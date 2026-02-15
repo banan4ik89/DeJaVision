@@ -1,6 +1,6 @@
 Hello World!
 TEST GAME - ABEBE_PROTOCOL.EXE
-Version: 0.1.2-alpha
+Version: 0.2.0-alpha
 
 Author: Mr. Banandee
 

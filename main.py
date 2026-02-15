@@ -182,7 +182,7 @@ styled_button(
 
 version_label = tk.Label(
     root,
-    text="Version 0.1.3-alpha",
+    text="Version 0.2.0-alpha",
     fg="gray",
     bg="black",
     font=("Terminal", 10)

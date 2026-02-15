@@ -490,6 +490,20 @@ def show_password_window(root):
                     status_label.config(text="Music turned ON")
                 else:
                     status_label.config(text="Usage: !sound on/off")
+            
+                        # ===== SECRET INCIDENT WINDOW =====
+            elif pwd == "!12340":
+                incident_path = os.path.join(get_exe_dir(), "data", "12340.txt")
+                if os.path.exists(incident_path):
+                    with open(incident_path, "r", encoding="utf-8") as f:
+                        incident_text = f.read()
+                    incident_win, incident_content = create_styled_window(root, "1230.TXT", 400, 300)
+                    text_widget = tk.Text(incident_content, bg="black", fg="lime", font=("Consolas", 12), wrap="word")
+                    text_widget.insert("1.0", incident_text)
+                    text_widget.config(state="disabled")
+                    text_widget.pack(expand=True, fill="both", padx=5, pady=5)
+                else:
+                    status_label.config(text="12340.txt not found")
 
             # ===== EASTER EGG =====
             elif pwd == "!easteregg":
@@ -507,6 +521,7 @@ def show_password_window(root):
 
             entry.delete(0, tk.END)
             return
+            
 
         # ===== История паролей =====
         password_history.append(pwd)
