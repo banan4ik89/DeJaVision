@@ -10,6 +10,8 @@ from password_window import show_password_window
 from intro import show_intro
 from background_music import play_music
 from config import BACKGROUND_MUSIC
+
+
 import time
 
 

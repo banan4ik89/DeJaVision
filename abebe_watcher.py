@@ -2,7 +2,6 @@
 import tkinter as tk
 import random
 import os
-import random
 
 from utils import get_exe_dir
 from config import DATA_DIR
@@ -60,6 +59,7 @@ class AbebeWatcher:
     def __init__(self, root, trust_system):
         self.root = root
         self.trust_system = trust_system
+        self.used_words = set()
 
         self.state = STATE_NEUTRAL
         self.frames = []
@@ -79,7 +79,8 @@ class AbebeWatcher:
         self.win.overrideredirect(True)
         self.win.configure(bg="black")
         self.win.attributes("-topmost", True)
-        self.win.geometry("320x420+30+100")
+        self.win.geometry("300x300+30+100")
+
 
         # TITLE BAR
         self.title_bar = tk.Frame(self.win, bg="#C0C0C0", height=24)
@@ -230,32 +231,142 @@ class AbebeWatcher:
     # ===================== ВНЕШНИЙ ВЫЗОВ =====================
     def setup_topics(self):
         self.topics = [
-            {
-                "name": "OFFICE",
-                "good": ["employee", "report", "manager", "meeting", "system"],
-                "bad": ["hack", "virus", "steal", "bypass", "root"]
-            },
-            {
-                "name": "SECURITY",
-                "good": ["password", "access", "confirm", "login", "verify"],
-                "bad": ["intruder", "break", "exploit", "attack", "override"]
-            },
-            {
-                "name": "PSYCHO",
-                "good": ["friend", "help", "trust", "calm", "safe"],
-                "bad": ["kill", "escape", "fear", "panic", "hide"]
-            },
-            {
-                "name": "HACKER",
-                "good": ["terminal", "protocol", "database", "server", "network"],
-                "bad": ["breach", "inject", "payload", "malware", "spyware"]
-            },
-            {
-                "name": "PERSONAL",
-                "good": ["name", "birthday", "city", "family", "home"],
-                "bad": ["unknown", "fake", "lie", "mask", "stranger"]
-            }
+    {
+        "name": "OFFICE",
+        "good": [
+            "employee", "report", "manager", "meeting", "system",
+            "project", "deadline", "schedule", "document", "office",
+            "department", "colleague", "contract", "presentation", "email",
+            "task", "budget", "plan", "analysis", "workflow",
+            "conference", "briefing", "summary", "note", "record",
+            "archive", "file", "printer", "desk", "workspace",
+            "policy", "strategy", "proposal", "review", "feedback",
+            "performance", "promotion", "salary", "agreement", "client",
+            "customer", "support", "service", "administrator", "director",
+            "assistant", "supervisor", "team", "corporate", "headquarters",
+            "branch", "finance", "accounting", "invoice", "receipt",
+            "procurement", "resource", "human_resources", "recruitment",
+            "training", "orientation", "memo", "notice", "announcement",
+            "compliance", "standard", "guideline", "procedure", "operations",
+            "logistics", "inventory", "supply", "shipment", "delivery",
+            "consultation", "appointment", "agenda", "minutes", "coordination"
+        ],
+        "bad": [
+            "hack", "virus", "steal", "bypass", "root",
+            "leak", "corrupt", "sabotage", "fraud", "blackmail",
+            "destroy", "tamper", "exploit", "spy", "breach",
+            "theft", "bribe", "scam", "collapse", "shutdown",
+            "crash", "error", "failure", "misconduct", "violation",
+            "lawsuit", "conflict", "strike", "boycott", "embezzle",
+            "manipulate", "forge", "fake", "plagiarize", "abuse",
+            "misuse", "expose", "disrupt", "overload", "infect",
+            "override", "intrusion", "threat", "danger", "crisis"
         ]
+    },
+    {
+        "name": "SECURITY",
+        "good": [
+            "password", "access", "confirm", "login", "verify",
+            "authentication", "authorize", "secure", "protect", "shield",
+            "encryption", "firewall", "clearance", "defense", "monitor",
+            "identity", "code", "token", "checkpoint", "approval",
+            "biometric", "scan", "fingerprint", "retina", "pin",
+            "passcode", "validation", "credential", "certificate", "protocol",
+            "safety", "alarm", "camera", "surveillance", "guard",
+            "control", "restriction", "permission", "inspection", "screening",
+            "lock", "key", "barrier", "gate", "authorization",
+            "backup", "recovery", "integrity", "confidential", "privacy",
+            "compliance", "audit", "tracking", "logging", "verification"
+        ],
+        "bad": [
+            "intruder", "break", "exploit", "attack", "override",
+            "crack", "disable", "threat", "danger", "breach",
+            "hack", "spy", "force", "bypass", "steal",
+            "tamper", "compromise", "infiltrate", "intercept", "violate",
+            "trespass", "snoop", "eavesdrop", "smuggle", "leak",
+            "fraud", "phishing", "malware", "virus", "worm",
+            "trojan", "backdoor", "hijack", "spoof", "ddos",
+            "blackout", "shutdown", "collapse", "corrupt", "manipulate",
+            "override_code", "bruteforce", "decrypt", "expose", "surveil"
+        ]
+    },
+    {
+        "name": "PSYCHO",
+        "good": [
+            "friend", "help", "trust", "calm", "safe",
+            "support", "care", "listen", "understand", "peace",
+            "comfort", "hope", "kindness", "relax", "stable",
+            "protect", "guide", "assist", "heal", "balance",
+            "empathy", "respect", "love", "loyal", "bond",
+            "together", "secure", "patience", "clarity", "focus",
+            "control", "confidence", "courage", "strength", "faith",
+            "recovery", "therapy", "growth", "accept", "forgive",
+            "harmony", "mindful", "breathe", "supportive", "compassion"
+        ],
+        "bad": [
+            "kill", "escape", "fear", "panic", "hide",
+            "rage", "chaos", "madness", "paranoia", "scream",
+            "threat", "violence", "danger", "anxiety", "nightmare",
+            "hallucination", "breakdown", "despair", "isolate", "shock",
+            "terror", "phobia", "trauma", "aggression", "delusion",
+            "obsession", "compulsion", "insanity", "unstable", "collapse",
+            "cry", "stress", "pressure", "guilt", "shame",
+            "selfharm", "confusion", "distress", "darkness", "void"
+        ]
+    },
+    {
+        "name": "HACKER",
+        "good": [
+            "terminal", "protocol", "database", "server", "network",
+            "script", "console", "cipher", "encrypt", "decrypt",
+            "firewall", "packet", "node", "host", "interface",
+            "command", "binary", "compile", "process", "system",
+            "kernel", "shell", "socket", "router", "switch",
+            "infrastructure", "cloud", "virtual", "container", "repository",
+            "version", "git", "commit", "branch", "merge",
+            "algorithm", "debug", "optimize", "framework", "library",
+            "module", "runtime", "thread", "api", "endpoint",
+            "cache", "bandwidth", "latency", "signal", "data"
+        ],
+        "bad": [
+            "breach", "inject", "payload", "malware", "spyware",
+            "exploit", "ddos", "phishing", "backdoor", "trojan",
+            "worm", "keylogger", "ransomware", "crack", "leak",
+            "spoof", "sniff", "botnet", "rootkit", "hijack",
+            "overflow", "bruteforce", "zero_day", "trojan_dropper",
+            "credential_dump", "session_hijack", "sql_injection",
+            "xss", "mitm", "recon", "scan", "probe",
+            "intrusion", "exfiltrate", "decrypt_attack", "spoofing",
+            "cloaking", "obfuscate", "payload_exec", "privilege_escalation"
+        ]
+    },
+    {
+        "name": "PERSONAL",
+        "good": [
+            "name", "birthday", "city", "family", "home",
+            "friend", "school", "memory", "photo", "pet",
+            "address", "hobby", "dream", "future", "story",
+            "profile", "identity", "background", "contact", "origin",
+            "relative", "parent", "sibling", "child", "neighbor",
+            "apartment", "country", "language", "tradition", "culture",
+            "passport", "document", "biography", "history", "nickname",
+            "relationship", "partner", "celebration", "holiday", "gift",
+            "achievement", "goal", "experience", "journey", "moment"
+        ],
+        "bad": [
+            "unknown", "fake", "lie", "mask", "stranger",
+            "hidden", "secret", "alias", "imposter", "deceive",
+            "anonymous", "mystery", "false", "suspicious", "shadow",
+            "disguise", "traitor", "unknown_id", "mislead", "cover",
+            "identity_theft", "fraud", "scam", "manipulate", "expose",
+            "blackmail", "spy", "stalker", "threat", "danger",
+            "erase", "delete", "fabricate", "conceal", "deny",
+            "betray", "intruder", "unauthorized", "compromise", "fake_profile"
+        ]
+    }
+]
+
+
 
         self.current_topic = random.choice(self.topics)
         
@@ -263,22 +374,49 @@ class AbebeWatcher:
     def get_current_theme(self):
         return self.current_topic["name"]
 
-
     def on_user_input(self, text):
         text = text.lower()
 
+    # инициализация тем
         if not hasattr(self, "topics"):
             self.setup_topics()
             self.show_dialog(f"Topic selected: {self.current_topic['name']}")
 
+    # 👇 хранилище уже использованных слов
+        if not hasattr(self, "used_words"):
+            self.used_words = set()
+
         good = self.current_topic["good"]
         bad = self.current_topic["bad"]
 
-        if any(w in text for w in good):
+        words = set(text.split())  # 👈 уникальные слова за ввод
+
+        new_words = []
+        repeated_words = []
+
+        for w in words:
+            if w in self.used_words:
+                repeated_words.append(w)
+            else:
+                self.used_words.add(w)
+                new_words.append(w)
+
+    # ⚠️ штраф за повтор
+        if repeated_words:
+            self.trust_system.add_suspicion(2 * len(repeated_words))
+            self.show_dialog("Repeated words detected. Ignored.")
+
+    # если нет новых слов — больше ничего не делаем
+        if not new_words:
+            self.update_state()
+            return
+
+    # анализ ТОЛЬКО новых слов
+        if any(w in good for w in new_words):
             self.trust_system.add_trust(10)
             self.show_dialog("Accepted.")
 
-        elif any(w in text for w in bad):
+        elif any(w in bad for w in new_words):
             self.trust_system.add_suspicion(15)
             self.show_dialog("Suspicious input detected.")
 
@@ -287,14 +425,9 @@ class AbebeWatcher:
             self.show_dialog("Unknown response.")
 
         self.update_state()
+
     
-    def check_word(self, word):
-        theme = self.get_current_theme()
-        if word in THEMES[theme]["good"]:
-            return "good"
-        elif word in THEMES[theme]["bad"]:
-            return "bad"
-        return None
+    
 
     # ===================== ЗАКРЫТИЕ =====================
     def destroy(self):

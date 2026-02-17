@@ -13,6 +13,8 @@ from background_music import play_music, stop_music, resume_music
 from trust_system import TrustSystem
 from abebe_watcher import AbebeWatcher
 from hack_decoder import show_hack_decoder
+from data.events.eye_watcher_event import EyeWatcherEvent
+import random
 
 from trust_system import TrustSystem
 from abebe_watcher import AbebeWatcher
@@ -346,7 +348,7 @@ def show_password_window(root):
         font=("Terminal", 14)
     ).pack(pady=10)
 
-    # ===== КОНТЕЙНЕР ДЛЯ ВВОДА + ГЛАЗА =====
+    
     entry_frame = tk.Frame(content, bg="black")
     entry_frame.pack(pady=5)
 
@@ -366,14 +368,32 @@ def show_password_window(root):
     entry.pack(side="left")
     
 
-    # ===== ГЛАЗ =====
+    
     show_password = False
 
     def toggle_password():
-        nonlocal show_password
+        nonlocal show_password, eye_event_active
+
+    # 👁 игрок пытается ПОКАЗАТЬ пароль
+        if not show_password and not eye_event_active and can_trigger_eye_event():
+            eye_event_active = True
+
+            def on_eye_finish():
+                nonlocal eye_event_active
+                eye_event_active = False
+
+            EyeWatcherEvent(
+                root=root,
+                trust_system=trust,
+                is_password_visible_cb=lambda: show_password,
+                on_finish=on_eye_finish
+            )
+
+    # обычное поведение кнопки
         show_password = not show_password
         entry.config(show="" if show_password else "*")
         eye_btn.config(text="🚫" if show_password else "👁")
+
 
     eye_btn = tk.Button(
         entry_frame,
@@ -408,7 +428,7 @@ def show_password_window(root):
     hint_btn.pack(side="left", padx=4)
 
 
-    # ===== СТАТУС =====
+    
     status_label = tk.Label(
         content,
         text="",
@@ -417,6 +437,8 @@ def show_password_window(root):
         font=("Consolas", 10)
     )
     status_label.pack()
+    status_clear_job = None
+
 
     f = font.Font(overstrike=1)
     tk.Label(content, text="пароль: 1401", font=f, fg="gray", bg="black").pack()
@@ -427,15 +449,89 @@ def show_password_window(root):
         "12525": show_good_end,
         "iobey98": show_iobey_audio
     }
+    
+    def can_trigger_eye_event():
+        return trust.trust > 70 and random.random() < 0.3
+    eye_event_active = False
+    
+    def clear_status():
+        nonlocal status_clear_job
+        status_label.config(text="")
+        status_clear_job = None
+
+    
+    def show_status(text, color="red", timeout=5000):
+        nonlocal status_clear_job
+
+    # отменяем предыдущий таймер
+        if status_clear_job:
+            win.after_cancel(status_clear_job)
+            status_clear_job = None
+
+        status_label.config(text=text, fg=color)
+
+    # автоочистка
+        status_clear_job = win.after(timeout, clear_status)
+        
+    last_submit_time = 0
+    SUBMIT_COOLDOWN = 700  # миллисекунды
+    
+    def unlock_confirm(delay=500):
+        win.after(delay, lambda: confirm_btn.config(state="normal"))
+
 
     def check():
-        nonlocal abebe
+        nonlocal abebe, eye_event_active
+        confirm_btn.config(state="disabled")
+        clear_status()
 
         pwd = entry.get().strip()
         
+        import string
+        import time
+        nonlocal last_submit_time
+
+        now = int(time.time() * 1000)
+        if now - last_submit_time < SUBMIT_COOLDOWN:
+            show_status("Please wait...")
+            unlock_confirm()
+            return
+
+        last_submit_time = now
+
+        if not (1 <= len(pwd) <= 18):
+            show_status("Input length must be 1–18 characters.")
+            unlock_confirm()
+            return
+
+
+
+        if not pwd:
+            show_status(text="Empty input is not allowed.")
+            entry.delete(0, tk.END)
+            unlock_confirm()
+            return
+
+
+        if " " in pwd:
+            show_status(text="Spaces are not allowed.")
+            entry.delete(0, tk.END)
+            unlock_confirm()
+            return
+
+
+        allowed_chars = string.ascii_letters + string.digits + string.punctuation
+
+        if any(c not in allowed_chars for c in pwd):
+            show_status(text="Invalid characters detected.")
+            entry.delete(0, tk.END)
+            unlock_confirm()
+            return
+
+        
         
 
-        # ===== КОМАНДЫ =====
+        
         if pwd.startswith("!"):
             confirm_btn.config(state="normal")
 
@@ -470,12 +566,43 @@ def show_password_window(root):
             # ===== RESET =====
             elif pwd == "!reset":
                 password_history.clear()
+
+    # сброс trust system
+                trust.trust = 50
+                trust.suspicion = 0
+                trust.update_ui()
+
+    # сброс watcher
                 abebe.destroy()
                 abebe = AbebeWatcher(root, trust)
-                status_label.config(text="Game reset!")
+
+                show_status("System reset completed.", color="lime")
+
             
             elif pwd == "!hack":
                 show_hack_decoder(root, abebe.get_current_theme())
+                
+            elif pwd == "!summon_eye":
+                nonlocal eye_event_active
+                if not eye_event_active:
+                    eye_event_active = True
+
+                    def on_eye_finish():
+                        nonlocal eye_event_active
+                        eye_event_active = False
+
+        # Запускаем EyeWatcher без условий
+                    EyeWatcherEvent(
+                        root=root,
+                        trust_system=trust,
+                        is_password_visible_cb=lambda: True,  # имитируем показ пароля
+                        on_finish=on_eye_finish,
+                        watch_time=3000
+                    )
+
+                show_status("EyeWatcher summoned!", color="lime")
+
+
 
 
 
@@ -520,6 +647,7 @@ def show_password_window(root):
                     status_label.config(text="easteregg.png not found")
 
             entry.delete(0, tk.END)
+            unlock_confirm()
             return
             
 
@@ -557,7 +685,7 @@ def show_password_window(root):
     # ===================== CONFIRM BUTTON =====================
     confirm_btn = tk.Button(
         content,
-        text="CONFIRM",
+        text="ENTER",
         command=check,
         bg="black",
         fg="white",

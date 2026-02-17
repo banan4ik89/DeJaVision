@@ -132,7 +132,7 @@ class TrustSystem:
         self.update_ui()
 
     def is_suspicious(self):
-        return self.suspicion >= 70
+        return self.suspicion >= 99
 
     
 
