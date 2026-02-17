@@ -595,7 +595,7 @@ def show_password_window(root):
                     EyeWatcherEvent(
                         root=root,
                         trust_system=trust,
-                        is_password_visible_cb=lambda: True,  # имитируем показ пароля
+                        is_password_visible_cb=lambda: show_password,
                         on_finish=on_eye_finish,
                         watch_time=3000
                     )
