@@ -10,6 +10,7 @@ from password_window import show_password_window
 from intro import show_intro
 from background_music import play_music
 from config import BACKGROUND_MUSIC
+from settings_window import show_settings
 
 
 import time
@@ -52,39 +53,134 @@ def show_splash(root):
     splash = tk.Toplevel(root)
     splash.configure(bg="black")
     splash.attributes("-fullscreen", True)
-    splash.attributes("-alpha", 1.0)  
+    splash.attributes("-alpha", 1.0)
 
-    sw = splash.winfo_screenwidth()
-    sh = splash.winfo_screenheight()
+    splash.lift()
+    splash.attributes("-topmost", True)
+    splash.after(10, lambda: splash.attributes("-topmost", False))
 
-    
-    tk.Label(
+    # ===== Skip control =====
+    skip_requested = [False]
+
+    def skip_splash(event=None):
+        if not skip_requested[0]:
+            skip_requested[0] = True
+            splash.destroy()
+
+    splash.bind("<Key>", skip_splash)
+    splash.bind("<Button-1>", skip_splash)
+    splash.focus_set()
+
+    # ===== Console text widget =====
+    text_widget = tk.Label(
         splash,
-        text="TEST GAME",
+        text="",
         fg="lime",
         bg="black",
-        font=("Terminal", 48, "bold")
-    ).pack(pady=sh//3)
+        font=("Terminal", 16),
+        justify="left",
+        anchor="nw"
+    )
+    text_widget.place(x=40, y=40)
 
-    
-    tk.Label(
-        splash,
-        text="Made by Mr. Banandee",
-        fg="gray",
-        bg="black",
-        font=("Terminal", 20)
-    ).pack(pady=20)
+    # ===== Boot lines =====
+    lines = [
+        "Booting ABEBE_PROTOCOL v0.2.3-alpha...",
+        "",
+        "Loading core modules...",
+        "Loading security layer...",
+        "Initializing trust system...",
+        "Injecting watcher module...",
+        "Watcher status: ONLINE",
+        "",
+        "Checking system integrity...",
+        "Verifying employee database...",
+        "",
+        "Project: Abebe Protocol",
+        "Author: Denis Kravchenko (Mr. Banandee)",
+        "",
+        "Finalizing boot sequence...",
+        "System ready.",
+        "",
+        "WARNING: Suspicious presence detected.",
+        "Analyzing entity...",
+        "ACCESS LEVEL: UNKNOWN",
+        "CRITICAL SECURITY FAILURE",
+        "SYSTEM WILL SHUT DOWN"
+    ]
 
-    
+    final_message = "\n\nJust kidding.\nWelcome back."
+
+    full_text = [""]
+    line_index = [0]
+    warning_triggered = [False]
+
+    # ===== Typing logic =====
+    def type_next_line():
+        if skip_requested[0]:
+            return
+
+        if line_index[0] >= len(lines):
+            splash.after(2000, show_final_phase)
+            return
+
+        current_line = lines[line_index[0]] + "\n"
+        char_index = [0]
+
+        def type_char():
+            if skip_requested[0]:
+                return
+
+            if char_index[0] < len(current_line):
+                full_text[0] += current_line[char_index[0]]
+                text_widget.config(text=full_text[0])
+                char_index[0] += 1
+                splash.after(35, type_char)
+            else:
+                # После WARNING делаем текст красным
+                if "WARNING: Suspicious presence detected." in current_line:
+                    text_widget.config(fg="red")
+                    warning_triggered[0] = True
+
+                line_index[0] += 1
+                splash.after(300, type_next_line)
+
+        type_char()
+
+    # ===== Final phase =====
+    def show_final_phase():
+        if skip_requested[0]:
+            return
+
+        text_widget.config(fg="lime")
+        char_index = [0]
+
+        def type_final():
+            if skip_requested[0]:
+                return
+
+            if char_index[0] < len(final_message):
+                full_text[0] += final_message[char_index[0]]
+                text_widget.config(text=full_text[0])
+                char_index[0] += 1
+                splash.after(45, type_final)
+            else:
+                splash.after(2000, fade_out)
+
+        type_final()
+
+    # ===== Fade out =====
     def fade_out(alpha=1.0):
+        if skip_requested[0]:
+            return
+
         if alpha > 0:
             splash.attributes("-alpha", alpha)
             splash.after(50, fade_out, alpha - 0.05)
         else:
             splash.destroy()
 
-    
-    splash.after(2000, fade_out)
+    splash.after(700, type_next_line)
 
     return splash
 
@@ -95,6 +191,7 @@ def exit_app():
 
 
 root = tk.Tk()
+root.withdraw()
 root.configure(bg="black")
 root.attributes("-fullscreen", True)
 block_esc(root)
@@ -104,9 +201,9 @@ sh = root.winfo_screenheight()
 root.geometry(f"{sw}x{sh}+0+0")
 
 play_music(BACKGROUND_MUSIC)
-show_splash(root)
 
-
+root.after(100, lambda: show_splash(root))
+root.deiconify()
 title_bar = tk.Frame(root, bg="#C0C0C0", height=28)
 title_bar.pack(fill="x", side="top")
 
@@ -171,6 +268,12 @@ styled_button(
 
 styled_button(
     content,
+    "SYSTEM SETTINGS",
+    command=lambda: show_settings(root)
+).pack(pady=12)
+
+styled_button(
+    content,
     "INTRODUCTION",
     command=lambda: show_intro(root)
 ).pack(pady=12)
@@ -184,7 +287,7 @@ styled_button(
 
 version_label = tk.Label(
     root,
-    text="Version 0.2.0-alpha",
+    text="Version 0.2.3-alpha",
     fg="gray",
     bg="black",
     font=("Terminal", 10)
