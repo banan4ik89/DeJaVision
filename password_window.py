@@ -375,7 +375,7 @@ def show_password_window(root):
         nonlocal show_password, eye_event_active
 
     # 👁 игрок пытается ПОКАЗАТЬ пароль
-        if not show_password and not eye_event_active and can_trigger_eye_event():
+        if show_password and not eye_event_active and can_trigger_eye_event():
             eye_event_active = True
 
             def on_eye_finish():
@@ -451,7 +451,7 @@ def show_password_window(root):
     }
     
     def can_trigger_eye_event():
-        return trust.trust > 70 and random.random() < 0.3
+        return trust.trust >= 70 and random.random() < 1.0
     eye_event_active = False
     
     def clear_status():
