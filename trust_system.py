@@ -1,7 +1,7 @@
 
 import tkinter as tk
-
-
+from window_registry import register
+from window_registry import unregister
 
 def make_draggable(win, bar):
     def start(e):
@@ -114,7 +114,7 @@ class TrustSystem:
             highlightbackground="red"
         )
         self.susp_bar.pack(fill="x")
-
+        register(self.win)
         self.update_ui()
 
     
@@ -156,11 +156,12 @@ class TrustSystem:
         self.susp_percent.config(text=f"{self.suspicion}%")
 
     
-
+    
     def _clamp(self):
         self.trust = max(0, min(self.max_value, self.trust))
         self.suspicion = max(0, min(self.max_value, self.suspicion))
 
     def destroy(self):
         if self.win.winfo_exists():
+            unregister(self.win)
             self.win.destroy()

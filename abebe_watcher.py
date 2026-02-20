@@ -5,6 +5,8 @@ import os
 
 from utils import get_exe_dir
 from config import DATA_DIR
+from abebe_confirm_exit import show_abebe_confirm
+from window_registry import register, unregister
 
 # ===================== СОСТОЯНИЯ =====================
 STATE_NEUTRAL = "neutral"
@@ -72,6 +74,10 @@ class AbebeWatcher:
         self._create_text_window()
         self._load_gif()
         self._animate()
+        
+    def exit_game(self):
+        from game_state import exit_game_confirmed
+        exit_game_confirmed()
 
     # ===================== ОКНО GIF =====================
     def _create_window(self):
@@ -103,7 +109,14 @@ class AbebeWatcher:
             cursor="hand2"
         )
         self.close_btn.pack(side="right", padx=4)
-        self.close_btn.bind("<Button-1>", lambda e: self.destroy())
+        self.close_btn.bind(
+            "<Button-1>",
+            lambda e: show_abebe_confirm(
+                self.root,
+                on_yes=self.exit_game,
+                on_no=lambda: None
+            )
+        )
         self.close_btn.bind("<Enter>", lambda e: self.close_btn.config(bg="red", fg="white"))
         self.close_btn.bind("<Leave>", lambda e: self.close_btn.config(bg="#C0C0C0", fg="black"))
 
@@ -119,7 +132,8 @@ class AbebeWatcher:
         self.text_win.overrideredirect(True)
         self.text_win.configure(bg="black")
         self.text_win.attributes("-topmost", True)
-        self.text_win.geometry("380x120+370+100")
+        self.text_win.geometry("380x120+370+100")\
+        
 
         # TITLE BAR
         self.text_title = tk.Frame(self.text_win, bg="#C0C0C0", height=24)
@@ -142,7 +156,14 @@ class AbebeWatcher:
             cursor="hand2"
         )
         self.text_close.pack(side="right", padx=4)
-        self.text_close.bind("<Button-1>", lambda e: self.text_win.destroy())
+        self.text_close.bind(
+            "<Button-1>",
+            lambda e: show_abebe_confirm(
+                self.root,
+                on_yes=self.exit_game,
+                on_no=lambda: None
+            )
+        )
         self.text_close.bind("<Enter>", lambda e: self.text_close.config(bg="red", fg="white"))
         self.text_close.bind("<Leave>", lambda e: self.text_close.config(bg="#C0C0C0", fg="black"))
 

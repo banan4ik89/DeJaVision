@@ -11,10 +11,11 @@ from intro import show_intro
 from background_music import play_music
 from config import BACKGROUND_MUSIC
 from settings_window import show_settings
-
+import game_state
 
 import time
 
+game_running = False
 
 def styled_button(parent, text, command, fg="white"):
     btn = tk.Button(
@@ -35,6 +36,17 @@ def styled_button(parent, text, command, fg="white"):
     btn.bind("<Enter>", lambda e: btn.config(fg="lime"))
     btn.bind("<Leave>", lambda e: btn.config(fg=fg))
     return btn
+
+def exit_game_confirmed():
+    global game_running
+
+    # закрываем ВСЕ Toplevel окна
+    for w in root.winfo_children():
+        if isinstance(w, tk.Toplevel):
+            w.destroy()
+
+    game_running = False
+    unlock_start_button()
 
 
 
@@ -114,6 +126,8 @@ def show_splash(root):
     full_text = [""]
     line_index = [0]
     warning_triggered = [False]
+    
+    game_state.init_game_state(root, open_game_btn)
 
     # ===== Typing logic =====
     def type_next_line():
@@ -231,7 +245,19 @@ close_btn.bind("<Button-1>", lambda e: exit_app())
 close_btn.bind("<Enter>", lambda e: close_btn.config(bg="red", fg="white"))
 close_btn.bind("<Leave>", lambda e: close_btn.config(bg="#C0C0C0", fg="black"))
 
+def lock_start_button():
+    open_game_btn.config(
+        state="disabled",
+        fg="gray",
+        text="ACCESS LOCKED"
+    )
 
+def unlock_start_button():
+    open_game_btn.config(
+        state="normal",
+        fg="white",
+        text="OPEN SECRET FILES"
+    )
 
 content = tk.Frame(root, bg="black")
 content.pack(expand=True)
@@ -260,11 +286,21 @@ tk.Label(
     font=("Terminal", 14)
 ).pack(pady=10)
 
-styled_button(
+def start_game():
+    global game_running
+    if game_running:
+        return
+
+    game_running = True
+    lock_start_button()
+    show_password_window(root)
+    
+open_game_btn = styled_button(
     content,
     "OPEN SECRET FILES",
-    command=lambda: show_password_window(root)
-).pack(pady=12)
+    command=lambda: game_state.start_game(show_password_window)
+)
+open_game_btn.pack(pady=12)
 
 styled_button(
     content,

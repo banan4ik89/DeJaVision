@@ -14,6 +14,9 @@ from trust_system import TrustSystem
 from abebe_watcher import AbebeWatcher
 from hack_decoder import show_hack_decoder
 from data.events.eye_watcher_event import EyeWatcherEvent
+from abebe_confirm_exit import show_abebe_confirm
+from game_state import exit_game_confirmed
+from window_registry import register, unregister
 import random
 
 from trust_system import TrustSystem
@@ -76,7 +79,14 @@ def create_styled_window(root, title_text, width=400, height=300):
     )
     close_btn.pack(side="right", padx=6)
 
-    close_btn.bind("<Button-1>", lambda e: win.destroy())
+    close_btn.bind(
+        "<Button-1>",
+        lambda e: show_abebe_confirm(
+            root,
+            on_yes=lambda: exit_game_confirmed(),
+            on_no=lambda: None  # ничего не делаем
+        )
+    )
     close_btn.bind("<Enter>", lambda e: close_btn.config(bg="red", fg="white"))
     close_btn.bind("<Leave>", lambda e: close_btn.config(bg="#C0C0C0", fg="black"))
 
@@ -97,6 +107,7 @@ def create_styled_window(root, title_text, width=400, height=300):
 # ===================== HELP WINDOW =====================
 def show_help_window(root):
     win, content = create_styled_window(root, "HELP.EXE", 420, 300)
+    register(win)
 
     tk.Label(
         content,
@@ -127,11 +138,10 @@ def show_help_window(root):
             font=("Terminal", 12)
         ).pack(anchor="w", padx=20, pady=4)
 
-
 # ===================== HISTORY WINDOW =====================
 def show_history_window(root):
     win, content = create_styled_window(root, "HISTORY.LOG", 420, 300)
-
+    register(win)
     tk.Label(
         content,
         text="ENTERED PASSWORDS",
@@ -160,7 +170,7 @@ def show_history_window(root):
 
 def show_hack_hint_window(root):
     win, content = create_styled_window(root, "HELPER.EXE", 300, 160)
-
+    register(win)
     tk.Label(
         content,
         text="SYSTEM TIP",
@@ -185,7 +195,7 @@ import threading
 
 def show_iobey_audio(root):
     win, content = create_styled_window(root, "AUDIO_PLAYER.EXE", 360, 220)
-
+    register(win)
     # держим окно поверх всего
     win.attributes("-topmost", True)
 
@@ -270,7 +280,7 @@ def show_iobey_audio(root):
 # ===================== GALLERY WINDOW =====================
 def show_gallery_window(root):
     win, content = create_styled_window(root, "GALLERY.EXE", 420, 320)
-
+    register(win)
     tk.Label(
         content,
         text="FILE STORAGE",
@@ -334,7 +344,7 @@ def show_password_window(root):
     global password_history
 
     win, content = create_styled_window(root, "PASSWORD_CHECK.EXE", 360, 300)
-
+    register(win)
     trust = TrustSystem(root)
     abebe = AbebeWatcher(root, trust)
     current_theme = abebe.get_current_theme()
