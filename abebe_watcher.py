@@ -263,6 +263,7 @@ class AbebeWatcher:
             "archive", "file", "printer", "desk", "workspace",
             "policy", "strategy", "proposal", "review", "feedback",
             "performance", "promotion", "salary", "agreement", "client",
+            "coffee",
             "customer", "support", "service", "administrator", "director",
             "assistant", "supervisor", "team", "corporate", "headquarters",
             "branch", "finance", "accounting", "invoice", "receipt",
@@ -403,14 +404,14 @@ class AbebeWatcher:
             self.setup_topics()
             self.show_dialog(f"Topic selected: {self.current_topic['name']}")
 
-    # 👇 хранилище уже использованных слов
+    # хранилище использованных слов
         if not hasattr(self, "used_words"):
             self.used_words = set()
 
         good = self.current_topic["good"]
         bad = self.current_topic["bad"]
 
-        words = set(text.split())  # 👈 уникальные слова за ввод
+        words = set(text.split())
 
         new_words = []
         repeated_words = []
@@ -422,22 +423,72 @@ class AbebeWatcher:
                 self.used_words.add(w)
                 new_words.append(w)
 
-    # ⚠️ штраф за повтор
+    # штраф за повтор
         if repeated_words:
             self.trust_system.add_suspicion(2 * len(repeated_words))
             self.show_dialog("Repeated words detected. Ignored.")
 
-    # если нет новых слов — больше ничего не делаем
         if not new_words:
             self.update_state()
             return
 
-    # анализ ТОЛЬКО новых слов
-        if any(w in good for w in new_words):
+    # ----------- УЛУЧШЕННАЯ ЛОГИКА СОВПАДЕНИЙ -----------
+
+        def normalize(word):
+        # множественное число
+            if word.endswith("s") and len(word) > 3:
+                word = word[:-1]
+
+        # -ing
+            if word.endswith("ing") and len(word) > 4:
+                base = word[:-3]
+                if not base.endswith("e"):
+                    base += "e"
+                return base
+
+        # -ed
+            if word.endswith("ed") and len(word) > 3:
+                base = word[:-2]
+                if not base.endswith("e"):
+                    base += "e"
+                return base
+
+            return word
+
+        def matches(word, word_list):
+            word_norm = normalize(word)
+
+            for base in word_list:
+                base_norm = normalize(base)
+
+            # точное совпадение
+                if word == base:
+                    return True
+
+            # совпадение после нормализации
+                if word_norm == base:
+                    return True
+
+                if word == base_norm:
+                    return True
+
+                if word_norm == base_norm:
+                    return True
+
+            # частичное совпадение
+                if word.startswith(base) or base.startswith(word):
+                    return True
+
+            return False
+
+        good_match = any(matches(w, good) for w in new_words)
+        bad_match = any(matches(w, bad) for w in new_words)
+
+        if good_match:
             self.trust_system.add_trust(10)
             self.show_dialog("Accepted.")
 
-        elif any(w in bad for w in new_words):
+        elif bad_match:
             self.trust_system.add_suspicion(15)
             self.show_dialog("Suspicious input detected.")
 
@@ -446,7 +497,6 @@ class AbebeWatcher:
             self.show_dialog("Unknown response.")
 
         self.update_state()
-
     
     
 
