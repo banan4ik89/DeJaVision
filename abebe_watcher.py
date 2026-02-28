@@ -7,7 +7,7 @@ from utils import get_exe_dir
 from config import DATA_DIR
 from abebe_confirm_exit import show_abebe_confirm
 from window_registry import register, unregister
-
+from data.events.creeper_event import CreeperEvent
 # ===================== СОСТОЯНИЯ =====================
 STATE_NEUTRAL = "neutral"
 STATE_HAPPY = "happy"
@@ -86,6 +86,7 @@ class AbebeWatcher:
         self.win.configure(bg="black")
         self.win.attributes("-topmost", True)
         self.win.geometry("300x300+30+100")
+        register(self.win)
 
 
         # TITLE BAR
@@ -129,6 +130,7 @@ class AbebeWatcher:
     # ===================== ОТДЕЛЬНОЕ ОКНО ТЕКСТА =====================
     def _create_text_window(self):
         self.text_win = tk.Toplevel(self.root)
+        register(self.text_win)
         self.text_win.overrideredirect(True)
         self.text_win.configure(bg="black")
         self.text_win.attributes("-topmost", True)
@@ -497,13 +499,24 @@ class AbebeWatcher:
             self.show_dialog("Unknown response.")
 
         self.update_state()
+        # ===== CREEPER EVENT CHECK =====
+        if (
+            self.trust_system.trust <= 20 and
+            self.trust_system.suspicion >= 70 and
+            not hasattr(self.trust_system, "creeper_triggered")
+        ):
+            self.trust_system.creeper_triggered = True
+            CreeperEvent(self.root, self.trust_system)
     
     
 
     # ===================== ЗАКРЫТИЕ =====================
     def destroy(self):
         if self.win.winfo_exists():
+            unregister(self.win)
             self.win.destroy()
+
         if self.text_win.winfo_exists():
+            unregister(self.text_win)
             self.text_win.destroy()
             

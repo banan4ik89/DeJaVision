@@ -5,7 +5,6 @@ import os
 
 from utils import block_esc, get_exe_dir
 from config import *
-from screens import show_image_fullscreen
 from fake_hack import start_fake_hack
 from good_end import show_good_end
 from minigame_pinball import start_pinball
@@ -17,6 +16,7 @@ from data.events.eye_watcher_event import EyeWatcherEvent
 from abebe_confirm_exit import show_abebe_confirm
 from game_state import exit_game_confirmed
 from window_registry import register, unregister
+from data.events.creeper_event import CreeperEvent
 import random
 
 from trust_system import TrustSystem
@@ -587,6 +587,9 @@ def show_password_window(root):
                 abebe = AbebeWatcher(root, trust)
 
                 show_status("System reset completed.", color="lime")
+                
+            elif pwd == "!summonnotcreep":
+                CreeperEvent(root, trust)
 
             
             elif pwd == "!hack":
