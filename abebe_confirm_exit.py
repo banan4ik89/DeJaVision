@@ -3,25 +3,51 @@ import tkinter as tk
 import random
 from utils import block_esc
 
+_confirm_window = None
+
 def show_abebe_confirm(root, on_yes, on_no=None):
+    global _confirm_window
+
+    # ✅ ЕСЛИ УЖЕ ОТКРЫТО — НИЧЕГО НЕ СОЗДАЁМ
+    if _confirm_window and _confirm_window.winfo_exists():
+        _confirm_window.lift()
+        return
+
     win = tk.Toplevel(root)
+    _confirm_window = win
+
+    # 🔗 правильная привязка
+    win.transient(root)
     win.overrideredirect(True)
     win.configure(bg="black")
     win.attributes("-topmost", True)
     block_esc(win)
 
-    # ===== SIZE (увеличили) =====
+    # ===== SIZE =====
     w, h = 480, 260
-    win.geometry(f"{w}x{h}+0+0")
-    win.update_idletasks()
-
     sw = win.winfo_screenwidth()
     sh = win.winfo_screenheight()
-
     x = (sw - w) // 2
     y = (sh - h) // 2
-
     win.geometry(f"{w}x{h}+{x}+{y}")
+
+    # ===== CLEANUP =====
+    def cleanup():
+        global _confirm_window
+        _confirm_window = None
+        if win.winfo_exists():
+            win.destroy()
+
+    def confirm():
+        cleanup()
+        on_yes()
+
+    def cancel():
+        cleanup()
+        if on_no:
+            on_no()
+
+    win.protocol("WM_DELETE_WINDOW", cancel)
 
     # ===== TITLE BAR =====
     title = tk.Frame(win, bg="#C0C0C0", height=28)
@@ -44,17 +70,6 @@ def show_abebe_confirm(root, on_yes, on_no=None):
         cursor="hand2"
     )
     close.pack(side="right", padx=8)
-
-    # ===== callbacks (нужны ДО bind) =====
-    def confirm():
-        win.destroy()
-        on_yes()
-
-    def cancel():
-        win.destroy()
-        if on_no:
-            on_no()
-
     close.bind("<Button-1>", lambda e: cancel())
 
     # ===== CONTENT =====
@@ -66,7 +81,7 @@ def show_abebe_confirm(root, on_yes, on_no=None):
     )
     content.pack(expand=True, fill="both", padx=8, pady=8)
 
-    label = tk.Label(
+    tk.Label(
         content,
         text="YOU ARE TRYING TO EXIT.\n\nABEBE IS WATCHING.\n\nCONFIRM DECISION.",
         fg="red",
@@ -74,14 +89,12 @@ def show_abebe_confirm(root, on_yes, on_no=None):
         font=("Terminal", 15),
         justify="center",
         wraplength=420
-    )
-    label.pack(pady=28)
+    ).pack(pady=28)
 
     btn_frame = tk.Frame(content, bg="black")
     btn_frame.pack(pady=12)
 
-    # ===== BIGGER BUTTONS =====
-    yes = tk.Button(
+    tk.Button(
         btn_frame,
         text="CONFIRM EXIT",
         width=18,
@@ -89,16 +102,12 @@ def show_abebe_confirm(root, on_yes, on_no=None):
         font=("Terminal", 13, "bold"),
         bg="black",
         fg="red",
-        activeforeground="white",
-        activebackground="black",
         relief="ridge",
         borderwidth=3,
-        cursor="hand2",
         command=confirm
-    )
-    yes.pack(side="left", padx=14)
+    ).pack(side="left", padx=14)
 
-    no = tk.Button(
+    tk.Button(
         btn_frame,
         text="STAY",
         width=18,
@@ -106,14 +115,10 @@ def show_abebe_confirm(root, on_yes, on_no=None):
         font=("Terminal", 13, "bold"),
         bg="black",
         fg="lime",
-        activeforeground="white",
-        activebackground="black",
         relief="ridge",
         borderwidth=3,
-        cursor="hand2",
         command=cancel
-    )
-    no.pack(side="right", padx=14)
+    ).pack(side="right", padx=14)
 
     # ===== SHAKE =====
     def shake():
@@ -121,9 +126,7 @@ def show_abebe_confirm(root, on_yes, on_no=None):
             return
         x = win.winfo_x()
         y = win.winfo_y()
-        dx = random.randint(-3, 3)
-        dy = random.randint(-3, 3)
-        win.geometry(f"+{x+dx}+{y+dy}")
+        win.geometry(f"+{x + random.randint(-3,3)}+{y + random.randint(-3,3)}")
         win.after(40, shake)
 
     shake()
