@@ -2,7 +2,7 @@
 import tkinter as tk
 import random
 import string
-
+from hack_maze3d import start_hack_maze
 
 
 def make_draggable(win, bar):
@@ -117,18 +117,15 @@ def show_hack_decoder(root, theme):
     def decrypt():
         nonlocal running
         running = False
-
         decrypt_btn.destroy()
-        write("Starting decryption...")
+        write("Entering breach simulation...")
 
-        def loading(i=0):
-            if i < 4:
-                write("Decrypting" + "." * (i + 1))
-                win.after(400, loading, i + 1)
-            else:
-                show_password_theme()
+        def unlocked():
+            show_password_theme()
 
-        loading()
+        start_hack_maze(root, win, unlocked)
+
+    
 
     decrypt_btn = tk.Button(
         btn_frame,
