@@ -78,6 +78,12 @@ def start_hack_maze(root, hack_window=None, on_success=lambda: None):
     meto_frames = load_gif_frames(resource_path("data/metopear.gif"))
     gun_img_raw = Image.open(resource_path("data/gun.png")).convert("RGBA")
     gun_img = None
+    orb_textures = {
+        "yellow": Image.open(resource_path("data/orbs/orb_yellow.png")).convert("RGBA"),
+        "red": Image.open(resource_path("data/orbs/orb_red.png")).convert("RGBA"),
+        "green": Image.open(resource_path("data/orbs/orb_green.png")).convert("RGBA"),
+        "violet": Image.open(resource_path("data/orbs/orb_violet.png")).convert("RGBA"),
+    }
     meto_frame_index = 0
     meto_x = meto_y = None
 
@@ -120,6 +126,25 @@ def start_hack_maze(root, hack_window=None, on_success=lambda: None):
         "min_x": 8.5,
         "max_x": 14.5
     }
+    
+        # === орб-черви ===
+    import random
+
+    orbworms = []
+    colors = list(orb_textures.keys())
+
+    for i in range(4):
+        length = random.randint(7, 9)
+
+        orbworms.append({
+            "x": -5.0 - i * 3,  # стартуют в разных местах
+            "base_y": 1.5 + i * 1.5,  # выше уровня игрока
+            "speed": 0.06 + random.random() * 0.02,
+            "length": length,
+            "color": colors[i],
+            "start_delay": random.random() * 2.5,  # разное время старта
+            "started": False
+        })
 
     last_mouse_x = W // 2
     win.event_generate("<Motion>", warp=True, x=last_mouse_x, y=H//2)
@@ -185,6 +210,8 @@ def start_hack_maze(root, hack_window=None, on_success=lambda: None):
         dx = world_x - player_x
         dy = world_y - player_y
         dist = math.hypot(dx, dy)
+        if dist < 0.3:
+            return
 
         angle = math.atan2(dy, dx) - player_angle
         
@@ -203,7 +230,10 @@ def start_hack_maze(root, hack_window=None, on_success=lambda: None):
         if depth_buffer[ray] < dist:
             return
 
-        size = max(1, int(H / dist * scale))
+        size = int(H / dist * scale)
+
+        if size > H:
+            size = H
         frame = frames[frame_index]
         scaled = frame.resize((size, size), Image.NEAREST)
         tk_img = ImageTk.PhotoImage(scaled)
@@ -350,6 +380,25 @@ def start_hack_maze(root, hack_window=None, on_success=lambda: None):
         enemy["x"] += 0.03 * enemy["dir"]
         if enemy["x"] < enemy["min_x"] or enemy["x"] > enemy["max_x"]:
             enemy["dir"] *= -1
+            
+                # === движение орб-червей ===
+        current_time = time.time()
+
+        for worm in orbworms:
+
+            # задержка старта
+            if not worm["started"]:
+                if current_time > worm["start_delay"]:
+                    worm["started"] = True
+                else:
+                    continue
+
+            worm["x"] += worm["speed"]
+
+            if worm["x"] > len(MAP[0]) + 5:
+                worm["x"] = -5
+                worm["start_delay"] = current_time + random.random() * 3
+                worm["started"] = False
 
     # детект
         if math.hypot(player_x - enemy["x"], player_y - enemy["y"]) < 0.4:
@@ -396,6 +445,34 @@ def start_hack_maze(root, hack_window=None, on_success=lambda: None):
     # === Meto-Pear рендер ===
         if meto_x:
             render_sprite(meto_frames, meto_frame_index, meto_x, meto_y, 0.6, depth_buffer)
+            
+                # === рендер орб-червей ===
+                # === рендер орб-червей (лесенка) ===
+        for worm in orbworms:
+            if not worm["started"]:
+                continue
+
+            texture = orb_textures[worm["color"]]
+
+            for i in range(worm["length"]):
+                # ближе друг к другу
+                segment_x = worm["x"] - i * 0.09
+
+                pattern = [0, -0.25, -0.5, -0.25]  # форма ступеньки
+
+                phase = int(worm["x"] * 8)    # скорость анимации
+                offset = pattern[(i + phase) % len(pattern)]
+
+                segment_y = worm["base_y"] + math.sin(i * 0.6 + worm["x"] * 4) * 0.3
+
+                render_sprite(
+                    [texture],
+                    0,
+                    segment_x,
+                    segment_y,
+                    0.42,
+                    depth_buffer
+                )
 
         draw_minimap()
         
