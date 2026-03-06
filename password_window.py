@@ -17,6 +17,7 @@ from abebe_confirm_exit import show_abebe_confirm
 from game_state import exit_game_confirmed
 from window_registry import register, unregister
 from data.events.creeper_event import CreeperEvent
+from secret_maze import start_secret_maze
 import random
 
 from trust_system import TrustSystem
@@ -576,6 +577,9 @@ def show_password_window(root):
             # ===== RESET =====
             elif pwd == "!reset":
                 password_history.clear()
+                
+            elif pwd =="!sec":
+                start_secret_maze(root)
 
     # сброс trust system
                 trust.trust = 50
