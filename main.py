@@ -12,6 +12,7 @@ from background_music import play_music
 from config import BACKGROUND_MUSIC
 from settings_window import show_settings
 import game_state
+import testing_maze
 
 import time
 
@@ -48,7 +49,8 @@ def exit_game_confirmed():
     game_running = False
     unlock_start_button()
 
-
+def start_new_game():
+    testing_maze.start_game(root)
 
 def make_draggable(win):
     def start(e):
@@ -128,7 +130,9 @@ def show_splash(root):
     warning_triggered = [False]
     
     game_state.init_game_state(root, open_game_btn)
+    
 
+    
     # ===== Typing logic =====
     def type_next_line():
         if skip_requested[0]:
@@ -295,6 +299,25 @@ def start_game():
     lock_start_button()
     show_password_window(root)
     
+styled_button(
+    content,
+    "NEW GAME",
+    command=start_new_game
+).pack(pady=12)
+
+load_game_btn = styled_button(
+    content,
+    "LOAD GAME",
+    command=lambda: None
+)
+
+load_game_btn.config(
+    state="disabled",
+    fg="gray"
+)
+
+load_game_btn.pack(pady=12)
+  
 open_game_btn = styled_button(
     content,
     "OPEN SECRET FILES",

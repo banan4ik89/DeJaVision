@@ -2,58 +2,60 @@ import tkinter as tk
 import math
 import time
 import os
+import random
 import sys
 import winsound
 from PIL import Image, ImageTk
 from fake_hack import start_fake_hack
 
 FOV = math.pi / 3
-NUM_RAYS = 320
-MAX_DEPTH = 20
+NUM_RAYS = 150
+MAX_DEPTH = 10
+MAX_RENDER_DIST = 25
 
-SPEED = 0.13
-ROT_SPEED = 0.08
+SPEED = 0.42
+ROT_SPEED = 0.11
 
 MINIMAP_SCALE = 14
 
 MAP = [
-".........####...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-".........#..#...........",
-"##########..############",
+".........###............",
+".........#.#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+".........#L#............",
+"##########.#############",
 "#........#..W.T........#",
 "#........####TT........#",
-"#........#.............#",
-"#........#.........E...#",
-"#........#.............#",
+"#......................#",
+"#..................E...#",
+"#......................#",
 "#........#.............#",
 "#........#.............#",
 "#........#.............#",
@@ -112,12 +114,25 @@ def start_secret_maze(root):
 
     canvas = tk.Canvas(win, bg="black", highlightthickness=0)
     canvas.pack(fill="both", expand=True)
+    intro_active = True
+    intro_text = "SECRET CASE 1.1.5 --- THE_CICADA"
+    intro_index = 0
+    intro_start = time.time()
+    pixel_glitch = True
+    intro_duration = 6
+    pixel_size = 28
+    pixel_grid = []
+    random.shuffle(pixel_grid)
+    pixel_grid = pixel_grid[:1200]
+    text_alpha = 255
+    fade_started = False
 
     W = win.winfo_screenwidth()
     H = win.winfo_screenheight()
 
     player_x = 10.5
     player_y = 2.5
+    player_z = 0.0
     player_angle = 0
     
     start_time = time.time()
@@ -139,7 +154,7 @@ def start_secret_maze(root):
         "green": Image.open(resource_path("data/orbs/orb_green.png")).convert("RGBA"),
         "violet": Image.open(resource_path("data/orbs/orb_violet.png")).convert("RGBA"),
     }
-    
+    game_start_time = time.time()
     eyewall_raw = Image.open(resource_path("data/eyewall.png")).convert("RGBA")
     meto_frame_index = 0
     meto_x = meto_y = None
@@ -152,6 +167,8 @@ def start_secret_maze(root):
     show_debug = False
     last_frame_time = time.time()
     fps = 0
+    fps_display = 0
+    fps_timer = 0
     gun_img = None
     GUN_SCALE = 0.25
     GUN_OFFSET_Y = 0.15
@@ -163,6 +180,7 @@ def start_secret_maze(root):
         "a": False,
         "d": False
     }
+    selected_slot = 1
     global trigger_activated
     trigger_activated = False
     player_frozen = False
@@ -191,10 +209,13 @@ def start_secret_maze(root):
 
     sprite_cache = []
     
-      # примерные, можешь менять
-    enemy_state = "sitting"  # состояния: sitting, getting_up, walking
+    
+    enemy_state = "sitting"
     enemy_frame_index = 0
     enemy_timer_start = None
+    gunitem_raw = Image.open(resource_path("data/gunitem.png")).convert("RGBA")
+    gunitem_raw = gunitem_raw.resize((40,40), Image.NEAREST)
+    gunitem_img = ImageTk.PhotoImage(gunitem_raw)
 
     enemy_gifs = {
         "sitting": load_gif_frames(resource_path("data/gifs/cicada/cicadasitting.gif")),
@@ -202,10 +223,24 @@ def start_secret_maze(root):
         "walking": load_gif_frames(resource_path("data/gifs/cicada/cicadawalking.gif"))
     }
     enemy_img = None
-    enemy_timer_start = None   # <-- здесь
+    enemy_timer_start = None 
     enemy_img = None
     enemy_x = None
     enemy_y = None
+    enemy_health = 100
+    enemy_max_health = 100
+    wall_tex = Image.open(resource_path("data/prison.png")).convert("RGB")
+    flash_timer = 0 
+    flash_duration = 0.08 
+
+    TEX_SIZE = 32
+    wall_tex = wall_tex.resize((TEX_SIZE, TEX_SIZE), Image.NEAREST)
+
+    texture_column_cache = {}
+    
+    for x in range(0, W, pixel_size):
+        for y in range(0, H, pixel_size):
+            pixel_grid.append([x, y, True])
 
     for y, row in enumerate(MAP):
         for x, c in enumerate(row):
@@ -215,6 +250,20 @@ def start_secret_maze(root):
                 break
         if enemy_x is not None:
             break
+        
+    lights = []
+
+    for y,row in enumerate(MAP):
+        for x,c in enumerate(row):
+            if c == "L":
+                lights.append((x+0.5,y+0.5))
+                
+    light_states = {}
+    light_timers = {}
+
+    for lx,ly in lights:
+        light_states[(lx,ly)] = True
+        light_timers[(lx,ly)] = time.time()
 
     def draw_minimap():
 
@@ -247,16 +296,105 @@ def start_secret_maze(root):
             py+math.sin(player_angle)*15,
             fill="#00ff00"
         )
+        
+    def draw_pixel_decode():
+
+        nonlocal pixel_grid, intro_active
+
+        progress = (time.time() - intro_start) / intro_duration
+
+        if progress >= 1:
+            intro_active = False
+            return
+
+        for p in pixel_grid:
+
+            x, y, active = p
+
+        
+            if active and random.random() < progress * 0.2:
+                p[2] = False
+
+            if p[2]:
+
+                shade = random.randint(0, 120)
+
+                canvas.create_rectangle(
+                    x, y,
+                    x + pixel_size,
+                    y + pixel_size,
+                    fill=f"#{shade:02x}{shade:02x}{shade:02x}",
+                    outline=""
+                )
+    
+    
+            
+    def draw_intro_text():
+
+        nonlocal intro_index, intro_active, fade_started
+
+        chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#@!?$%"
+    
+   
+        if intro_index < len(intro_text):
+            intro_index += 1
+
+        shown = intro_text[:intro_index]
+
+    
+        if intro_index >= len(intro_text):
+            fade_started = True
+
+    
+        if fade_started:
+
+            decay = (time.time() - intro_start) * 0.5
+
+            glitched = ""
+
+            for c in shown:
+
+            
+                if random.random() < decay * 0.03:
+                    glitched += " "
+                    continue
+
+            
+                if random.random() < decay * 0.08:
+                    glitched += random.choice(chars)
+                else:
+                    glitched += c
+
+            shown = glitched
+
+        
+            size = int(42 - decay * 3)
+
+            if size < 8:
+                intro_active = False
+                return
+
+        else:
+            size = 42
+
+        canvas.create_text(
+            W//2,
+            H//2,
+            text=shown,
+            fill="#00ff88",
+            font=("Terminal", size)
+        )
 
 
     def render():
-
-        nonlocal player_x,player_y,player_angle
+        nonlocal flash_timer, flash_duration
+        nonlocal player_x,player_y,player_z,player_angle
         nonlocal bob_phase,bob_offset
         nonlocal last_frame_time
         nonlocal gun_img
         nonlocal player_frozen, freeze_end_time
         global trigger_activated
+        nonlocal fps_timer, fps_display
         
         
         
@@ -266,32 +404,50 @@ def start_secret_maze(root):
         t = time.time()
         delta = now - last_frame_time
         last_frame_time = now
+        if delta > 0:
+            fps = int(1 / delta)
+            
+        fps_timer += delta
+            
+        if fps_timer > 0.2:
+            fps_display = int(fps)
+            fps_timer = 0
+        texture_column_cache.clear()
 
         move_x = 0
         move_y = 0
         nonlocal enemy_x, enemy_y, enemy_state, enemy_frame_index, enemy_timer_start, enemy_img
+        
+        
 
-# запускаем таймер 47 секунд после входа в триггер
+        for key in light_states:
+
+            if time.time() - light_timers[key] > random.uniform(0.05,0.3):
+
+                light_timers[key] = time.time()
+
+                if random.random() < 0.2:
+                    light_states[key] = not light_states[key]
+
         if trigger_activated and enemy_state == "sitting" and enemy_timer_start is None:
             enemy_timer_start = time.time()
 
-# проверяем, прошло ли 47 секунд, чтобы начать getting_up
+
         if enemy_timer_start:
             elapsed = time.time() - enemy_timer_start
             if elapsed >= 47 and enemy_state == "sitting":
                 enemy_state = "getting_up"
                 enemy_frame_index = 0
 
-# движение за игроком, если уже walking
         if enemy_state == "walking":
             dx = player_x - enemy_x
             dy = player_y - enemy_y
             dist = math.hypot(dx, dy)
-            if dist > 0.2:  # дистанция, чтобы не наседал слишком близко
-                enemy_x += (dx / dist) * SPEED * 0.5  # враг медленнее игрока
-                enemy_y += (dy / dist) * SPEED * 0.5
+            if dist > 0.2:  
+                enemy_x += (dx / dist) * SPEED * 0.2 
+                enemy_y += (dy / dist) * SPEED * 0.2
 
-# рисуем врага
+
         
         
         if trigger_activated and enemy_state == "sitting" and enemy_timer_start is None:
@@ -308,7 +464,7 @@ def start_secret_maze(root):
             if time.time() > freeze_end_time:
                 player_frozen = False
 
-        if not player_frozen:
+        if not player_frozen and not intro_active:
 
             if keys["w"]:
                 move_x += math.cos(player_angle)*SPEED
@@ -322,6 +478,18 @@ def start_secret_maze(root):
 
         nx = player_x + move_x
         ny = player_y + move_y
+        cell = MAP[int(ny)][int(nx)]
+
+        if cell != "#":
+            player_x = nx
+            player_y = ny
+
+            if cell == "L":
+                player_z += 0.2 * delta
+                
+                steps = max(1, int(player_z * 5)) 
+            else:
+                steps = 0
 
         if not is_wall(nx,ny):
             player_x = nx
@@ -347,29 +515,125 @@ def start_secret_maze(root):
             freeze_end_time = time.time() + 47
 
         canvas.delete("all")
+        # потолок
+        canvas.create_rectangle(
+            0, 0,
+            W, H//2,
+            fill="#202020",
+            outline=""
+        )
+
+# пол
+        canvas.create_rectangle(
+            0, H//2 - int(player_z*30),
+            W, H + 2,
+            fill="#1A1A1A",
+            outline=""
+        )
         sprite_cache.clear()
         depth_buffer = []
 
-        canvas.create_rectangle(0,0,W,H//2,fill="#87CEEB",outline="")
-        canvas.create_rectangle(0,H//2,W,H,fill="#555555",outline="")
-
+        # --- ПОТОЛОК ---
+        # --- ПОТОЛОК ---
+        
+        
         for r in range(NUM_RAYS):
 
             ray_angle = player_angle - FOV/2 + FOV*r/NUM_RAYS
 
-            depth = 0
+            # позиция в сетке
+            map_x = int(player_x)
+            map_y = int(player_y)
 
-            while depth < MAX_DEPTH:
+            ray_dir_x = math.cos(ray_angle)
+            ray_dir_y = math.sin(ray_angle)
 
-                depth += 0.05
+            delta_dist_x = abs(1 / ray_dir_x) if ray_dir_x != 0 else 1e30
+            delta_dist_y = abs(1 / ray_dir_y) if ray_dir_y != 0 else 1e30
 
-                tx = player_x + math.cos(ray_angle)*depth
-                ty = player_y + math.sin(ray_angle)*depth
+# шаг
+            if ray_dir_x < 0:
+                step_x = -1
+                side_dist_x = (player_x - map_x) * delta_dist_x
+            else:
+                step_x = 1
+                side_dist_x = (map_x + 1.0 - player_x) * delta_dist_x
 
-                if is_wall(tx,ty):
-                    break
+            if ray_dir_y < 0:
+                step_y = -1
+                side_dist_y = (player_y - map_y) * delta_dist_y
+            else:
+                step_y = 1
+                side_dist_y = (map_y + 1.0 - player_y) * delta_dist_y
+
+            hit = False
+            side = 0
+            steps = 0
+
+            while not hit and steps < 50:
+                steps += 1
+
+                if side_dist_x < side_dist_y:
+                    side_dist_x += delta_dist_x
+                    map_x += step_x
+                    side = 0
+                else:
+                    side_dist_y += delta_dist_y
+                    map_y += step_y
+                    side = 1
+
+                if is_wall(map_x, map_y):
+                    hit = True
+
+# расстояние до стены
+           # расстояние до стены
+            if side == 0:
+                depth = (map_x - player_x + (1 - step_x) / 2) / ray_dir_x
+            else:
+                depth = (map_y - player_y + (1 - step_y) / 2) / ray_dir_y
+
+            # корректируем угол для эффекта fish-eye
+            depth *= math.cos(ray_angle - player_angle)
+
+            # новая проверка: если стена дальше MAX_RENDER_DIST — пропускаем
+            if depth > MAX_RENDER_DIST:
+                depth_buffer.append(None)
+                continue
 
             depth_buffer.append(depth)
+
+# точка удара
+            hit_x = player_x + ray_dir_x * depth
+            hit_y = player_y + ray_dir_y * depth
+            if depth is None:
+                depth_buffer.append(None)
+                continue
+
+            # вычисляем угол до стены
+            angle_from_player = math.atan2(hit_y - player_y, hit_x - player_x) - player_angle
+            while angle_from_player > math.pi:
+                angle_from_player -= 2 * math.pi
+            while angle_from_player < -math.pi:
+                angle_from_player += 2 * math.pi
+
+            # если стена сзади игрока — пропускаем
+            if abs(angle_from_player) > FOV / 2:
+                depth_buffer.append(None)
+                continue
+            light_boost = 0
+
+            for lx,ly in lights:
+
+                if not light_states[(lx,ly)]:
+                    continue
+
+                dist_light = math.hypot(hit_x - lx, hit_y - ly)
+
+                if dist_light < 4:
+
+                    light_boost += (1/(dist_light+0.2)) * 120
+            
+            
 
             wall_height = min(H, H/(depth+0.1))
 
@@ -378,25 +642,107 @@ def start_secret_maze(root):
             shade = int(90/(1+depth*depth*0.1) + pulse)
 
             shade = max(30, min(120, shade))
+            
+            if flash_timer > 0:
+                shade = min(255, shade + int(100 * (flash_timer / flash_duration)))  # увеличиваем яркость
+                flash_timer -= delta  # уменьшаем таймер
+
+            
 
             x = r*W/NUM_RAYS
-            shade = int(120/(1+depth*depth*0.1))
-            shade = max(40, shade)
+            # туман (чем дальше стена — тем темнее)
+            FOG_DIST = 7
 
-            canvas.create_line(
-                x,
-                H/2-wall_height/2 + bob_offset,
-                x,
-                H/2+wall_height/2 + bob_offset,
+            fog = min((depth / FOG_DIST) ** 1.5, 1)
 
-                fill=f"#{shade:02x}{shade:02x}{shade:02x}",
-                width=W/NUM_RAYS+1
-            )
-            
+            base = 150
+
+            shade = int(base * (1 - fog))
+
+            shade += int(light_boost * (1 - fog))
+
+            shade = max(10, min(220, shade))
+
+            shade = max(15, min(220, shade))
+
+            line_x = int(r * W / NUM_RAYS)
+            ray_width = math.ceil(W / NUM_RAYS)
+
+            wall_x = hit_x - math.floor(hit_x)
+            wall_y = hit_y - math.floor(hit_y)
+
+            if side == 0:
+                wall_x = hit_y
+            else:
+                wall_x = hit_x
+
+            wall_x -= math.floor(wall_x)
+
+            tex_x = int(wall_x * TEX_SIZE)
+            wall_x -= math.floor(wall_x)
+            tex_x = int(wall_x * TEX_SIZE)
+
+            from PIL import ImageEnhance
+
+            key = (tex_x, int(wall_height))  # сначала ключ!
+
+            if key not in texture_column_cache:
+                enhancer = ImageEnhance.Brightness(wall_tex.crop((tex_x, 0, tex_x+1, TEX_SIZE)))
+                column = enhancer.enhance(shade / 255)
+                column = column.resize((int(W/NUM_RAYS)+2, int(wall_height)), Image.NEAREST)
+                texture_column_cache[key] = ImageTk.PhotoImage(column)
+
+            img = texture_column_cache[key]
+
+            if key not in texture_column_cache:
+
+                column = wall_tex.crop((tex_x, 0, tex_x+1, TEX_SIZE))
+
+                column = column.resize(
+                    (int(W/NUM_RAYS)+2, int(wall_height)),
+                    Image.NEAREST
+                )
+
+                texture_column_cache[key] = ImageTk.PhotoImage(column)
+
+            img = texture_column_cache[key]
+
+            # рисуем стену с эффектом ступеней
+            for s in range(steps):
+                y_pos = int(H/2 - wall_height/2 - (player_z - s*0.2)*30 + bob_offset)
+                
+                # добавляем небольшой сдвиг, чтобы нижний край стены заходил в пол
+                y_pos = max(0, min(y_pos, H - 1))  # верх не выше 0, низ не ниже H-1
+                
+                canvas.create_image(
+                    line_x,
+                    y_pos,
+                    image=img,
+                    anchor="nw"
+                )
+            # базовый оттенок стены
+            base = 150
+            fog = min((depth / FOG_DIST) ** 1.5, 1)
+            shade = int(base * (1 - fog))
+
+            # свет от ламп
+            shade += int(light_boost * (1 - fog))
+
+            # пульсация и flash
+            pulse = math.sin(t*2 + r*0.05) * 15
+            shade += int(pulse)
+
+            if flash_timer > 0:
+                shade = min(255, shade + int(100 * (flash_timer / flash_duration)))
+                flash_timer -= delta
+
+            # ограничиваем диапазон
+            shade = max(15, min(255, shade))
         frames = enemy_gifs[enemy_state]
 
 # увеличение индекса кадра
-        enemy_frame_index += 1
+        if int(time.time() * 8) % 2 == 0:
+            enemy_frame_index += 1
 
 # проверка на конец анимации
         if enemy_frame_index >= len(frames):
@@ -422,6 +768,7 @@ def start_secret_maze(root):
             scale,          # используем масштаб
             depth_buffer
         )
+        
 
         # draw_minimap()
         
@@ -440,31 +787,209 @@ def start_secret_maze(root):
 
             gun_img = ImageTk.PhotoImage(gun)
 
+        if selected_slot == 1:
+            canvas.create_image(
+                W//2,
+                H - int(H*0.15) - int(bob_offset/2),
+                image=gun_img
+            )
+        # ================= HUD =================
+
+        ui_x1 = W - 200
+        ui_y1 = 10
+        ui_x2 = W - 10
+        ui_y2 = 300
+
+        canvas.create_rectangle(
+            ui_x1, ui_y1,
+            ui_x2, ui_y2,
+            fill="#000000",
+            outline="#00ff00"
+        )
+
+        # --- AMMO ---
+        if selected_slot == 1:
+            canvas.create_text(
+                W-105,
+                30,
+                fill="#00ff00",
+                font=("Terminal",16),
+                text=f"GUN   AMMO {ammo}/{max_ammo}"
+            )
+
+        # --- HP TEXT ---
+        canvas.create_text(
+            W-170,
+            70,
+            fill="#00ff00",
+            font=("Terminal",14),
+            text="100%"
+        )
+
+        # --- БОЛЬШАЯ КРАСНАЯ ПОЛОСА HP ---
+        hp_percent = 1.0
+        bar_height = 100
+
+        canvas.create_rectangle(
+            W-185,
+            80,
+            W-160,
+            80 + bar_height,
+            fill="#220000",
+            outline="#00ff00"
+        )
+
+        canvas.create_rectangle(
+            W-185,
+            80 + bar_height*(1-hp_percent),
+            W-160,
+            80 + bar_height,
+            fill="red",
+            outline=""
+        )
+
+        # === ИНВЕНТАРЬ (ВЕРТИКАЛЬНЫЕ СЛОТЫ) ===
+
+        slot_size = 34
+        slot_x = W - 130
+        slot_start_y = 80
+
+        for i in range(5):
+
+            slot = i + 1
+            y = slot_start_y + i*(slot_size+8)
+
+            size = slot_size
+            x = slot_x
+
+            # увеличиваем выбранный слот
+            if slot == selected_slot:
+                size = slot_size + 6
+                x = slot_x - 3
+
+            canvas.create_text(
+                slot_x - 12,
+                y + slot_size/2,
+                text=str(slot),
+                fill="#00ff00",
+                font=("Terminal",10)
+            )
+
+            canvas.create_rectangle(
+                x,
+                y,
+                x + size,
+                y + size,
+                outline="#00ff00",
+                fill="white"
+            )
+
+        # --- ПРЕДМЕТ В ПЕРВОМ СЛОТЕ ---
         canvas.create_image(
-            W//2,
-            H - int(H*0.15) - int(bob_offset/2),
-            image=gun_img
+            slot_x + slot_size/2,
+            slot_start_y + slot_size/2,
+            image=gunitem_img
         )
+        
+        # рисуем HP босса
+        if enemy_state == "walking":
 
-        canvas.create_text(
-            W//2,
-            20,
-            fill="#ff0000",
-            font=("Terminal",16),
-            text="W/S MOVE   A/D TURN"
-        )
-        canvas.create_text(
-            W-120,
-            40,
-            fill="white",
-            font=("Terminal",16),
-            text=f"AMMO {ammo}/{max_ammo}"
-        )
+            bar_width = 400
+            bar_height = 25
 
+            x = W//2 - bar_width//2
+            y = 40
+
+    # фон
+            canvas.create_rectangle(
+                x, y,
+                x + bar_width,
+                y + bar_height,
+                fill="#330000",
+                outline="white"
+            )
+
+    # HP
+            hp_ratio = enemy_health / enemy_max_health
+
+            canvas.create_rectangle(
+                x, y,
+                x + bar_width * hp_ratio,
+                y + bar_height,
+                fill="red",
+                outline=""
+            )
+
+    # имя босса
+            canvas.create_text(
+                W//2,
+                y - 15,
+                text="Dr. Hale",
+                fill="white",
+                font=("Terminal",20)
+            )
+        # прицел
+        canvas.create_line(W//2-10, H//2, W//2+10, H//2, fill="white", width=2)
+        canvas.create_line(W//2, H//2-10, W//2, H//2+10, fill="white", width=2)
+        if show_debug:
+
+            canvas.create_rectangle(
+                5,5,
+                220,120,
+                fill="#000000",
+                outline="#00ff00"
+            )
+
+            canvas.create_text(
+                10,10,
+                anchor="nw",
+                fill="#00ff00",
+                font=("Terminal",14),
+                text=f"FPS: {fps_display}"
+            )
+
+            canvas.create_text(
+                10,30,
+                anchor="nw",
+                fill="#00ff00",
+                font=("Terminal",14),
+                text=f"RAYS: {NUM_RAYS}"
+            )
+
+            canvas.create_text(
+                10,50,
+                anchor="nw",
+                fill="#00ff00",
+                font=("Terminal",14),
+                text=f"SPRITES: {len(sprite_cache)}"
+            )
+
+            canvas.create_text(
+                10,70,
+                anchor="nw",
+                fill="#00ff00",
+                font=("Terminal",14),
+                text=f"POS: {player_x:.2f} {player_y:.2f}"
+            )
+
+            canvas.create_text(
+                10,90,
+                anchor="nw",
+                fill="#00ff00",
+                font=("Terminal",14),
+                text=f"ANGLE: {math.degrees(player_angle):.1f}"
+            )
+        
+        if intro_active:
+            draw_pixel_decode()
+            draw_intro_text()
         win.after(16,render)
     
     def shoot_gun():
         nonlocal gunshoot_animating, gun_img, ammo, reloading
+        nonlocal enemy_health, selected_slot
+        if selected_slot != 1:
+            return
 
         if not has_gun or gunshoot_animating or reloading:
             return
@@ -474,35 +999,45 @@ def start_secret_maze(root):
             return
 
         ammo -= 1
-        gunshoot_animating = True
+        flash_timer = flash_duration
 
+        # проверка попадания во врага
+        dx = enemy_x - player_x
+        dy = enemy_y - player_y
+        dist = math.hypot(dx, dy)
+        angle_to_enemy = math.atan2(dy, dx)
+        angle_diff = angle_to_enemy - player_angle
+
+        while angle_diff > math.pi:
+            angle_diff -= 2*math.pi
+        while angle_diff < -math.pi:
+            angle_diff += 2*math.pi
+
+        if abs(angle_diff) < 0.05 and dist < 8 and enemy_state == "walking":
+            enemy_health -= 2
+
+        # анимация выстрела
         def animate(index=0):
             nonlocal gunshoot_animating, gun_img
 
-        # если анимация закончилась
             if index >= len(gunshoot_frames_raw):
                 gunshoot_animating = False
-
-            # вернуть обычный пистолет
+                # вернуть обычный пистолет
                 w, h = gun_img_raw.size
                 new_w = int(W * GUN_SCALE)
                 scale = new_w / w
                 new_h = int(h * scale)
-
                 frame = gun_img_raw.resize((new_w, new_h), Image.NEAREST)
                 gun_img = ImageTk.PhotoImage(frame)
                 return
 
             frame = gunshoot_frames_raw[index].resize(
-                (
-                    int(W * GUN_SCALE),
-                    int(gun_img_raw.height * (W * GUN_SCALE) / gun_img_raw.width)
-                ),
+                (int(W * GUN_SCALE),
+                int(gun_img_raw.height * (W * GUN_SCALE) / gun_img_raw.width)),
                 Image.NEAREST
             )
 
             gun_img = ImageTk.PhotoImage(frame)
-
             canvas.create_image(
                 W // 2,
                 H - int(H * GUN_OFFSET_Y) - int(bob_offset / 2),
@@ -515,7 +1050,7 @@ def start_secret_maze(root):
         
     def reload_gun():
         nonlocal reloading, gun_img, ammo
-
+        
         if reloading:
             return
 
@@ -554,8 +1089,11 @@ def start_secret_maze(root):
 
         dist = math.hypot(dx, dy)
 
-        angle = math.atan2(dy, dx) - player_angle
+    # ограничиваем минимальное расстояние, чтобы спрайт не стал огромным
+        if dist < 0.5:
+            dist = 0.5
 
+        angle = math.atan2(dy, dx) - player_angle
         while angle > math.pi:
             angle -= 2 * math.pi
         while angle < -math.pi:
@@ -568,14 +1106,20 @@ def start_secret_maze(root):
 
         frame = frames[frame_index]
 
+    # вычисляем размер спрайта на экране
         sprite_height = int(H / (dist + 0.0001) * scale)
-        sprite_height = min(sprite_height, H * 2)
+
+    # лимитируем максимальный размер, чтобы не падал FPS
+        max_sprite_size = 1500
+        if sprite_height > max_sprite_size:
+            sprite_height = max_sprite_size
 
         sprite_width = int(sprite_height * frame.width / frame.height)
 
-    # округляем размер чтобы уменьшить количество resize
+    # создаем ключ для кэша
         key = (frame_index, sprite_width, sprite_height)
 
+    # если такой спрайт уже есть в кэше — используем его
         if key not in sprite_resize_cache:
             img = frame.resize((sprite_width, sprite_height), Image.NEAREST)
             sprite_resize_cache[key] = ImageTk.PhotoImage(img)
@@ -586,15 +1130,38 @@ def start_secret_maze(root):
         y1 = H // 2 - sprite_height // 2 + bob_offset
 
         ray = int(screen_x / W * NUM_RAYS)
-
         if 0 <= ray < len(depth_buffer):
-            if depth_buffer[ray] < dist:
+            if depth_buffer[ray] is not None and depth_buffer[ray] < dist:
                 return
 
         canvas.create_image(x1, y1, image=img, anchor="nw")
 
         sprite_cache.append(img)
         
+    def render_light(x,y,depth_buffer):
+
+        dx = x - player_x
+        dy = y - player_y
+
+        dist = math.hypot(dx,dy)
+
+        angle = math.atan2(dy,dx) - player_angle
+
+        if abs(angle) > FOV/2:
+            return
+
+        screen_x = (angle + FOV/2) / FOV * W
+
+        size = int(H/(dist+0.1)*0.2)
+
+        canvas.create_oval(
+            screen_x-size,
+            H//2-size,
+            screen_x+size,
+            H//2+size,
+            fill="#ffaa33",
+            outline=""
+        )
     def open_debug():
 
         dbg = tk.Toplevel(win)
@@ -615,6 +1182,7 @@ def start_secret_maze(root):
         ammo = max_ammo
 
     def key_down(e):
+        nonlocal selected_slot
 
         k = e.keysym.lower()
 
@@ -623,9 +1191,12 @@ def start_secret_maze(root):
         if k == "r":
             reload_gun()
 
-        if k == "=":
-            open_debug()
-
+        if k == "f":
+            nonlocal show_debug
+            show_debug = not show_debug
+            
+        if k in ["1","2","3","4","5"]:
+            selected_slot = int(k)
 
     def key_up(e):
 
@@ -638,5 +1209,19 @@ def start_secret_maze(root):
     win.bind("<KeyPress>",key_down)
     win.bind("<KeyRelease>",key_up)
     win.bind("<Button-1>", lambda e: shoot_gun())
+    def mouse_wheel(e):
+        nonlocal selected_slot
+
+        if e.delta > 0:
+            selected_slot -= 1
+        else:
+            selected_slot += 1
+
+        if selected_slot < 1:
+            selected_slot = 5
+        if selected_slot > 5:
+            selected_slot = 1
+
+    win.bind("<MouseWheel>", mouse_wheel)
 
     render()

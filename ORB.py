@@ -77,7 +77,7 @@ if __name__ == "__main__":
 
     orb = generate_retro_orb(
         size=256,
-        base_color=(101,67,33),
+        base_color=(255,254,233),
         pixel_size=32
     )
 
