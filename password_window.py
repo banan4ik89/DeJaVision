@@ -18,6 +18,7 @@ from game_state import exit_game_confirmed
 from window_registry import register, unregister
 from data.events.creeper_event import CreeperEvent
 from secret_maze import start_secret_maze
+from testing_maze import start_testing_maze
 import random
 
 from trust_system import TrustSystem
@@ -580,6 +581,8 @@ def show_password_window(root):
                 
             elif pwd =="!sec":
                 start_secret_maze(root)
+            elif pwd =="!test":
+                start_testing_maze(root)
 
     # сброс trust system
                 trust.trust = 50

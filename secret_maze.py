@@ -9,9 +9,10 @@ from PIL import Image, ImageTk
 from fake_hack import start_fake_hack
 
 FOV = math.pi / 3
-NUM_RAYS = 150
+NUM_RAYS = 80
 MAX_DEPTH = 10
 MAX_RENDER_DIST = 25
+
 
 SPEED = 0.42
 ROT_SPEED = 0.11
@@ -115,7 +116,7 @@ def start_secret_maze(root):
     canvas = tk.Canvas(win, bg="black", highlightthickness=0)
     canvas.pack(fill="both", expand=True)
     intro_active = True
-    intro_text = "SECRET CASE 1.1.5 --- THE_CICADA"
+    intro_text = "SECRET CASE 1.1.5 /// THE_CICADA_PRISON"
     intro_index = 0
     intro_start = time.time()
     pixel_glitch = True
@@ -126,6 +127,8 @@ def start_secret_maze(root):
     pixel_grid = pixel_grid[:1200]
     text_alpha = 255
     fade_started = False
+
+    hud_start_time = time.time()
 
     W = win.winfo_screenwidth()
     H = win.winfo_screenheight()
@@ -154,6 +157,17 @@ def start_secret_maze(root):
         "green": Image.open(resource_path("data/orbs/orb_green.png")).convert("RGBA"),
         "violet": Image.open(resource_path("data/orbs/orb_violet.png")).convert("RGBA"),
     }
+    hud_raw = Image.open(resource_path("data/hud.png")).convert("RGBA")
+
+    HUD_SCALE_X = 3.8   # шире
+    HUD_SCALE_Y = 3.2   # чуть ниже
+
+    hud_w = int(128 * HUD_SCALE_X)
+    hud_h = int(48 * HUD_SCALE_Y)
+
+    hud_img = ImageTk.PhotoImage(
+        hud_raw.resize((hud_w, hud_h), Image.NEAREST)
+    )
     game_start_time = time.time()
     eyewall_raw = Image.open(resource_path("data/eyewall.png")).convert("RGBA")
     meto_frame_index = 0
@@ -330,47 +344,46 @@ def start_secret_maze(root):
     
             
     def draw_intro_text():
-
         nonlocal intro_index, intro_active, fade_started
 
         chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#@!?$%"
-    
-   
+
+        elapsed = time.time() - intro_start
+
+        # появление текста
         if intro_index < len(intro_text):
             intro_index += 1
 
         shown = intro_text[:intro_index]
 
-    
+        # запускаем fade после полной печати
         if intro_index >= len(intro_text):
             fade_started = True
 
-    
         if fade_started:
+            fade_time = elapsed - 2  # небольшая пауза перед исчезновением
+            fade_time = max(0, fade_time)
 
-            decay = (time.time() - intro_start) * 0.5
+            # 🔥 СКОЛЬКО СИМВОЛОВ ОСТАЁТСЯ
+            remain_ratio = max(0, 1 - fade_time * 0.25)
+            visible_len = int(len(shown) * remain_ratio)
 
+            shown = shown[:visible_len]
+
+            # 🔥 мягкий глитч
             glitched = ""
-
             for c in shown:
-
-            
-                if random.random() < decay * 0.03:
-                    glitched += " "
-                    continue
-
-            
-                if random.random() < decay * 0.08:
+                if random.random() < 0.15 * fade_time:
                     glitched += random.choice(chars)
                 else:
                     glitched += c
 
             shown = glitched
 
-        
-            size = int(42 - decay * 3)
+            # 🔥 плавное уменьшение размера
+            size = int(42 * remain_ratio)
 
-            if size < 8:
+            if size <= 6 or visible_len <= 0:
                 intro_active = False
                 return
 
@@ -486,10 +499,13 @@ def start_secret_maze(root):
 
             if cell == "L":
                 player_z += 0.2 * delta
-                
-                steps = max(1, int(player_z * 5)) 
+                player_z = min(player_z, 1.0)  # ограничение (чтобы не улетал в космос)
             else:
-                steps = 0
+                player_z -= 0.3 * delta
+                if player_z < 0:
+                    player_z = 0
+
+            steps = max(1, int(player_z * 5))
 
         if not is_wall(nx,ny):
             player_x = nx
@@ -515,21 +531,40 @@ def start_secret_maze(root):
             freeze_end_time = time.time() + 47
 
         canvas.delete("all")
-        # потолок
-        canvas.create_rectangle(
-            0, 0,
-            W, H//2,
-            fill="#202020",
-            outline=""
-        )
+        
+        # --- РЕНДЕР ПОЛА И ПОТОЛКА ---  
 
-# пол
-        canvas.create_rectangle(
-            0, H//2 - int(player_z*30),
-            W, H + 2,
-            fill="#1A1A1A",
-            outline=""
-        )
+# Настройки
+        ceiling_base = 120
+        floor_base = 120
+        num_steps = 60  # чем больше, тем плавнее градиент
+
+        # Потолок (ближе ярче, дальше темнее)
+        for i in range(num_steps):
+            y1 = int(i * (H//2) / num_steps)
+            y2 = int((i+1) * (H//2) / num_steps)
+            dist_ratio = i / num_steps
+            fog = 1 - dist_ratio  # инвертируем для потолка
+            shade = int(ceiling_base * fog)
+            shade = max(15, min(shade, 220))
+            color = f"#{shade:02x}{shade:02x}{shade:02x}"
+            canvas.create_rectangle(0, y1, W, y2, fill=color, outline="")
+
+        # Пол (ближе светлее, дальше темнее)
+        for i in range(num_steps):
+            y1 = H//2 + int(i * (H//2) / num_steps)
+            y2 = H//2 + int((i+1) * (H//2) / num_steps)
+
+            dist_ratio = i / num_steps  # 0 = далеко, 1 = близко
+            fog = dist_ratio            # теперь всё логично
+
+            shade = int(floor_base * fog)
+            shade = max(15, min(shade, 220))
+
+            color = f"#{shade:02x}{shade:02x}{shade:02x}"
+
+            canvas.create_rectangle(0, y1, W, y2, fill=color, outline="")
+        
         sprite_cache.clear()
         depth_buffer = []
 
@@ -793,101 +828,148 @@ def start_secret_maze(root):
                 H - int(H*0.15) - int(bob_offset/2),
                 image=gun_img
             )
-        # ================= HUD =================
+        
+        # === HUD IMAGE ===
 
-        ui_x1 = W - 200
-        ui_y1 = 10
-        ui_x2 = W - 10
-        ui_y2 = 300
+        hud_x = W - hud_w - 20
+        hud_y = H - hud_h - 20
 
-        canvas.create_rectangle(
-            ui_x1, ui_y1,
-            ui_x2, ui_y2,
-            fill="#000000",
-            outline="#00ff00"
+        canvas.create_image(
+            hud_x,
+            hud_y,
+            image=hud_img,
+            anchor="nw"
         )
-
-        # --- AMMO ---
-        if selected_slot == 1:
-            canvas.create_text(
-                W-105,
-                30,
-                fill="#00ff00",
-                font=("Terminal",16),
-                text=f"GUN   AMMO {ammo}/{max_ammo}"
-            )
-
-        # --- HP TEXT ---
+        # AMMO
         canvas.create_text(
-            W-170,
-            70,
+            hud_x + 26,
+            hud_y + 28,
+            text="AMMO:",
             fill="#00ff00",
-            font=("Terminal",14),
-            text="100%"
+            font=("Terminal", 16),
+            anchor="w"
         )
 
-        # --- БОЛЬШАЯ КРАСНАЯ ПОЛОСА HP ---
-        hp_percent = 1.0
-        bar_height = 100
-
-        canvas.create_rectangle(
-            W-185,
-            80,
-            W-160,
-            80 + bar_height,
-            fill="#220000",
-            outline="#00ff00"
+        canvas.create_text(
+            hud_x + 23,
+            hud_y + 48,
+            text=f"{ammo}/{max_ammo}",
+            fill="#00ff00",
+            font=("Terminal", 18),
+            anchor="w"
         )
 
-        canvas.create_rectangle(
-            W-185,
-            80 + bar_height*(1-hp_percent),
-            W-160,
-            80 + bar_height,
-            fill="red",
-            outline=""
-        )
+        # HP кубики
+        hp_percent = 1.0  # тут можно поставить enemy_health/max_health если для игрока
+        max_blocks = 10
+        filled_blocks = int(max_blocks * hp_percent)
 
-        # === ИНВЕНТАРЬ (ВЕРТИКАЛЬНЫЕ СЛОТЫ) ===
+        block_size = 10
+        block_spacing = 3
 
-        slot_size = 34
-        slot_x = W - 130
-        slot_start_y = 80
+        start_hp_x = hud_x + hud_w//2 + 20 # ближе к центру
+        start_hp_y = hud_y + 40
 
-        for i in range(5):
+        for i in range(max_blocks):
+            x = start_hp_x + i * (block_size + block_spacing)
+            y = start_hp_y
 
-            slot = i + 1
-            y = slot_start_y + i*(slot_size+8)
-
-            size = slot_size
-            x = slot_x
-
-            # увеличиваем выбранный слот
-            if slot == selected_slot:
-                size = slot_size + 6
-                x = slot_x - 3
-
-            canvas.create_text(
-                slot_x - 12,
-                y + slot_size/2,
-                text=str(slot),
-                fill="#00ff00",
-                font=("Terminal",10)
-            )
+            color = "red" if i < filled_blocks else "#220000"
 
             canvas.create_rectangle(
-                x,
-                y,
-                x + size,
-                y + size,
-                outline="#00ff00",
-                fill="white"
+                x, y,
+                x + block_size,
+                y + block_size,
+                fill=color,
+                outline="#00ff00"
             )
 
-        # --- ПРЕДМЕТ В ПЕРВОМ СЛОТЕ ---
+        canvas.create_text(
+            start_hp_x,
+            start_hp_y - 10,
+            text="HP:",
+            fill="#00ff00",
+            font=("Terminal", 16),
+            anchor="w"
+        )
+        # === ЧАСЫ НА HUD ===
+        # === ЧАСЫ НА HUD ===
+        elapsed = time.time() - hud_start_time  # время с начала игры
+        minutes = int(elapsed // 60) % 60
+        seconds = int(elapsed % 60)
+        milliseconds = int((elapsed % 1) * 1000)
+        time_text = f"{minutes:02}:{seconds:02}:{milliseconds:03}"
+
+        # позиция часов относительно HUD
+        clock_offset_x = 30
+        clock_offset_y = hud_h - 55
+
+        # фон часов внутри HUD
+        clock_width = 80
+        clock_height = 28
+        canvas.create_rectangle(
+            hud_x + clock_offset_x,
+            hud_y + clock_offset_y,
+            hud_x + clock_offset_x + clock_width,
+            hud_y + clock_offset_y + clock_height,
+            fill="#000000",
+            outline="#00ff00",
+            width=2
+        )
+
+        # текст часов
+        canvas.create_text(
+            hud_x + clock_offset_x + clock_width // 2,
+            hud_y + clock_offset_y + clock_height // 2,
+            text=time_text,
+            fill="#00ff00",
+            font=("Terminal", 13, "bold"),
+            anchor="center"
+        )
+
+        # === СЛОТЫ В HUD (компактнее) ===
+        slot_size = 32
+        slot_spacing = 6   # ближе друг к другу
+
+        # переносим ближе к центру HUD
+        start_x = hud_x + hud_w//2 - (2*slot_size + 1.5*slot_spacing)  # чтобы 5 слотов по центру HUD
+        start_y = hud_y + hud_h - slot_size - 35
+
+        for i in range(5):
+            x = start_x + i * (slot_size + slot_spacing)
+            y = start_y
+
+            # выделение выбранного
+            if (i + 1) == selected_slot:
+                canvas.create_rectangle(
+                    x-2, y-2,
+                    x+slot_size+2, y+slot_size+2,
+                    outline="yellow",
+                    width=2
+                )
+
+            canvas.create_rectangle(
+                x, y,
+                x + slot_size,
+                y + slot_size,
+                outline="#00ff00",
+                width=2,
+                fill="#666666"
+            )
+
+            # номер слота
+            canvas.create_text(
+                x + slot_size//2,
+                y + slot_size + 10,
+                text=str(i+1),
+                fill="#00ff00",
+                font=("Terminal", 11)
+            )
+
+        # Иконка предмета
         canvas.create_image(
-            slot_x + slot_size/2,
-            slot_start_y + slot_size/2,
+            start_x + slot_size//2,
+            start_y + slot_size//2,
             image=gunitem_img
         )
         
