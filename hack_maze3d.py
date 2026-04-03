@@ -1,23 +1,35 @@
-import tkinter as tk
 import math
-import time
 import os
+import random
 import sys
-import winsound
-from PIL import Image, ImageTk
+import time
+
+import pygame
+from PIL import Image
+
+from background_music import play_sound_effect
 from fake_hack import start_fake_hack
+from maze_pygame_common import GAME_VIEW_H, GAME_VIEW_W, blit_game_view_upscaled
+from pause_menu import run_pause_menu
+from raycast_engine import (
+    NUM_RAYS,
+    draw_sky_floor_split,
+    pil_to_surface,
+    raycast_step_sampling_walls,
+    render_sprite_hack_square,
+)
+from user_settings import get_fov_radians, get_game_view_size, get_show_debug_stats, get_show_fps, get_view_bob
 
-FOV = math.pi / 3
-NUM_RAYS = 320
 MAX_DEPTH = 20
-SPEED = 0.13
-ROT_SPEED_KEYS = 0.08
-
+RAY_STEP = 0.05
+SPEED = 0.052
+TURN_SMOOTH = 26.0
+ROT_RATE = 3.6
+ROT_SUBSTEPS = 8
+GUN_BOTTOM_MARGIN = -14
 TIME_LIMIT = 90
 
-MINIMAP_SCALE = 14
-
-MAP = [
+MAP_TEMPLATE = [
     "#S#####################",
     "#......#..............#",
     "#......#.....#........#",
@@ -32,8 +44,9 @@ MAP = [
     "#..#......#...#....####",
     "#..#..##..#...#.......#",
     "#.....##......#.......#",
-    "#######################"
+    "#######################",
 ]
+
 
 def resource_path(relative_path):
     try:
@@ -42,10 +55,10 @@ def resource_path(relative_path):
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
+
 def load_gif_frames(path):
     gif = Image.open(path)
     frames = []
-
     try:
         while True:
             frame = gif.copy().convert("RGBA")
@@ -53,23 +66,60 @@ def load_gif_frames(path):
             gif.seek(len(frames))
     except EOFError:
         pass
-
     return frames
 
 
 def start_hack_maze(root, hack_window=None, on_success=lambda: None):
-    win = tk.Toplevel(root)
-    win.attributes("-fullscreen", True)
-    win.attributes("-topmost", True)
-    win.configure(bg="black")
+    game_view_w, game_view_h = get_game_view_size()
+    num_rays = game_view_w
+    bob_strength = get_view_bob()
+    pygame.init()
+    info = pygame.display.Info()
+    W, H = info.current_w, info.current_h
+    screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN | pygame.DOUBLEBUF)
+    game_surface = pygame.Surface((game_view_w, game_view_h))
+    pygame.display.set_caption("HACK MAZE")
+    clock = pygame.time.Clock()
 
-    canvas = tk.Canvas(win, bg="black", highlightthickness=0)
-    canvas.pack(fill="both", expand=True)
+    font_ui = pygame.font.SysFont("consolas", 16)
+    font_ui_big = pygame.font.SysFont("consolas", 40)
+    font_dialog = pygame.font.SysFont("consolas", 20)
+    font_dbg = pygame.font.SysFont("consolas", 14)
+    font_intro = pygame.font.SysFont("consolas", 42)
 
-    W = win.winfo_screenwidth()
-    H = win.winfo_screenheight()
+    MAP_ROWS = list(MAP_TEMPLATE)
 
-    player_x, player_y, player_angle = 2.5, 2.5, 0
+    def is_wall(x, y):
+        if x < 0 or y < 0 or int(y) >= len(MAP_ROWS) or int(x) >= len(MAP_ROWS[0]):
+            return True
+        cell = MAP_ROWS[int(y)][int(x)]
+        if cell == "8":
+            return not has_key
+        if cell == "S":
+            if has_key and has_gun:
+                return False
+            return True
+        return cell == "#"
+
+    intro_active = True
+    intro_text = "CASE H.0.1 /// HACK_MAZE"
+    intro_index = 0
+    intro_start = time.time()
+    intro_duration = 8
+    pixel_size = 28
+    pixel_grid = []
+    for x in range(0, W, pixel_size):
+        for y in range(0, H, pixel_size):
+            pixel_grid.append([x, y, True])
+    random.shuffle(pixel_grid)
+    pixel_grid = pixel_grid[:1200]
+    fade_started = False
+
+    player_spawn_x, player_spawn_y = 2.5, 2.5
+    player_start_cutscene_offset = 2.0
+    player_x = player_spawn_x - player_start_cutscene_offset
+    player_y = player_spawn_y
+    player_angle = 0.0
     start_time = time.time()
     game_over = False
     has_key = False
@@ -78,11 +128,11 @@ def start_hack_maze(root, hack_window=None, on_success=lambda: None):
     key_frames = load_gif_frames(resource_path("data/key.gif"))
     goal_frames = load_gif_frames(resource_path("data/whatthe.gif"))
     meto_frames = load_gif_frames(resource_path("data/metopear.gif"))
-    gun_img_raw = Image.open(resource_path("data/gun.png")).convert("RGBA")
-    gunshoot_frames_raw = load_gif_frames(resource_path("data/gunshoot.gif"))
-    gunshoot_frames = [ImageTk.PhotoImage(f.resize((int(W*0.4), int(H*0.4)), Image.NEAREST)) for f in gunshoot_frames_raw]
-    gunshoot_animating = False
-    gun_img = None
+    gun_img_raw = Image.open(resource_path("data/gifs/hands/gun.png")).convert("RGBA")
+    gunshoot_frames_raw = load_gif_frames(resource_path("data/gifs/hands/gunshoot.gif"))
+    gunreload_frames_raw = load_gif_frames(resource_path("data/gifs/hands/gunreload.gif"))
+
+    GUN_SCALE = 0.25
     orb_textures = {
         "yellow": Image.open(resource_path("data/orbs/orb_yellow.png")).convert("RGBA"),
         "red": Image.open(resource_path("data/orbs/orb_red.png")).convert("RGBA"),
@@ -90,482 +140,399 @@ def start_hack_maze(root, hack_window=None, on_success=lambda: None):
         "violet": Image.open(resource_path("data/orbs/orb_violet.png")).convert("RGBA"),
     }
     eyewall_raw = Image.open(resource_path("data/eyewall.png")).convert("RGBA")
+
     meto_frame_index = 0
     meto_x = meto_y = None
-    bob_phase = 0
-    bob_offset = 0
-    is_moving = False
-    eye_event_active = False
-    eye_event_triggered = False
-    eye_event_end_time = 0
-    show_debug = False
-    last_frame_time = time.time()
-    fps = 0
-    gun_img = None
-    GUN_SCALE = 0.25
-    GUN_OFFSET_Y = 0.15
-    ammo = 17
-    max_ammo = 17 
-    keys = {
-        "w": False,
-        "s": False,
-        "a": False,
-        "d": False
-    }
-
-    reloading = False
-    gunreload_frames_raw = load_gif_frames(resource_path("data/gunreload.gif"))
-    gunreload_frames = [ImageTk.PhotoImage(f.resize((int(W*0.4), int(H*0.4)), Image.NEAREST)) for f in gunreload_frames_raw]
-
-    eye_zone_x = 14.5
-    eye_zone_y = 7
-    eye_zone_radius = 0.6
-
-    for y, row in enumerate(MAP):
+    for y, row in enumerate(MAP_ROWS):
         for x, c in enumerate(row):
             if c == "P":
                 meto_x, meto_y = x + 0.5, y + 0.5
-    # === состояние диалога ===
+
     dialog_active = False
     dialog_step = 0
-
     dialog_full_text = ""
     dialog_display_text = ""
     dialog_index = 0
     dialog_typing = False
-
     meto_triggered = False
     has_gun = False
     enemy_frame_index = 0
     key_frame_index = 0
     goal_frame_index = 0
-
     last_anim_time = time.time()
     ANIM_SPEED = 0.15
 
-    sprite_cache = []
-
-    # === поиск цели ===
     goal_x = goal_y = None
-    for y, row in enumerate(MAP):
+    for y, row in enumerate(MAP_ROWS):
         for x, c in enumerate(row):
             if c == "?":
                 goal_x, goal_y = x + 0.5, y + 0.5
 
-    # === враг ===
-    enemy = {
-        "x": 10.5,
-        "y": 6.5,
-        "dir": 1,
-        "min_x": 8.5,
-        "max_x": 14.5
-    }
-    
-        # === орб-черви ===
-    import random
+    enemy = {"x": 10.5, "y": 6.5, "dir": 1, "min_x": 8.5, "max_x": 14.5}
 
     orbworms = []
     colors = list(orb_textures.keys())
-
     for i in range(4):
         length = random.randint(7, 9)
+        orbworms.append(
+            {
+                "x": -5.0 - i * 3,
+                "base_y": 1.5 + i * 1.5,
+                "speed": 0.06 + random.random() * 0.02,
+                "length": length,
+                "color": colors[i],
+                "start_delay": random.random() * 2.5,
+                "started": False,
+            }
+        )
 
-        orbworms.append({
-            "x": -5.0 - i * 3,  # стартуют в разных местах
-            "base_y": 1.5 + i * 1.5,  # выше уровня игрока
-            "speed": 0.06 + random.random() * 0.02,
-            "length": length,
-            "color": colors[i],
-            "start_delay": random.random() * 2.5,  # разное время старта
-            "started": False
-        })
+    eye_zone_x = 14.5
+    eye_zone_y = 7
+    eye_zone_radius = 0.6
+    eye_event_active = False
+    eye_event_triggered = False
+    eye_event_end_time = 0.0
 
-    last_mouse_x = W // 2
-    win.event_generate("<Motion>", warp=True, x=last_mouse_x, y=H//2)
-    
-    def shoot_gun():
-        nonlocal gunshoot_animating, gun_img, ammo, reloading
+    keys = {"w": False, "s": False, "a": False, "d": False}
+    ammo = 17
+    max_ammo = 17
+    reloading = False
+    gunshoot_animating = False
+    gunshoot_frame_index = 0
+    reload_anim_index = 0
+    reload_anim_active = False
+    shoot_acc = 0.0
+    reload_acc = 0.0
+    show_debug = get_show_debug_stats()
+    last_frame_time = time.time()
+    fps = 0
+    last_step_time = 0.0
 
-        if not has_gun or gunshoot_animating or reloading:
-            return
+    bob_phase = 0.0
+    turn_smooth = 0.0
+    bob_offset = 0.0
+    bob_side_offset = 0.0
 
-        if ammo <= 0:
-            reload_gun()
-            return
+    def _clamp01(v: float) -> float:
+        return max(0.0, min(1.0, v))
 
-        ammo -= 1
-        gunshoot_animating = True
+    def _ease_out_cubic(x: float) -> float:
+        x = _clamp01(x)
+        return 1.0 - (1.0 - x) ** 3
 
-        def animate(index=0):
-            nonlocal gunshoot_animating, gun_img
+    start_cutscene_active = True
+    start_cutscene_started = False
+    start_cutscene_start_time = 0.0
+    start_cutscene_open_t = 0.0
+    start_cutscene_close_t = 0.0
+    START_DOOR_OPEN_DUR = 0.55
+    START_MOVE_DUR = 0.7
+    START_DOOR_CLOSE_DUR = 0.45
+    START_TOTAL_DUR = START_DOOR_OPEN_DUR + START_MOVE_DUR + START_DOOR_CLOSE_DUR
 
-        # если анимация закончилась
-            if index >= len(gunshoot_frames_raw):
-                gunshoot_animating = False
+    door_left_tex = Image.open(resource_path("data/Lelevatordoor.png")).convert("RGBA")
+    door_right_tex = Image.open(resource_path("data/Relevatordoor.png")).convert("RGBA")
+    DOOR_CLOSE_STEPS = 12
+    DOOR_PIL_H = 64
+    DOOR_PIL_W_MIN = 48
+    DOOR_PIL_W_MAX = DOOR_PIL_H
+    door_left_frames = []
+    door_right_frames = []
+    for i in range(DOOR_CLOSE_STEPS):
+        ct = i / max(1, DOOR_CLOSE_STEPS - 1)
+        ct_thin = _clamp01((ct - 0.65) / 0.35)
+        w = int(DOOR_PIL_W_MAX * (1.0 - ct_thin) + DOOR_PIL_W_MIN * ct_thin)
+        w = max(1, w)
+        door_left_frames.append(door_left_tex.resize((w, DOOR_PIL_H), Image.NEAREST))
+        door_right_frames.append(door_right_tex.resize((w, DOOR_PIL_H), Image.NEAREST))
 
-            # вернуть обычный пистолет
-                w, h = gun_img_raw.size
-                new_w = int(W * GUN_SCALE)
-                scale = new_w / w
-                new_h = int(h * scale)
+    pending_action = None
+    pending_until = 0.0
+    dialog_close_until = 0.0
+    caught_by_enemy = False
 
-                frame = gun_img_raw.resize((new_w, new_h), Image.NEAREST)
-                gun_img = ImageTk.PhotoImage(frame)
-                return
+    running = True
+    next_action = None
 
-            frame = gunshoot_frames_raw[index].resize(
-                (
-                    int(W * GUN_SCALE),
-                    int(gun_img_raw.height * (W * GUN_SCALE) / gun_img_raw.width)
-                ),
-                Image.NEAREST
-            )
+    def build_gun_surface(pil_img):
+        w, h = pil_img.size
+        nw = int(game_view_w * GUN_SCALE)
+        nh = int(h * (nw / w))
+        return pil_to_surface(pil_img.resize((nw, nh), Image.NEAREST))
 
-            gun_img = ImageTk.PhotoImage(frame)
-
-            canvas.create_image(
-                W // 2,
-                H - int(H * GUN_OFFSET_Y) - int(bob_offset / 2),
-                image=gun_img
-            )
-
-            win.after(50, animate, index + 1)
-
-        animate()
-        
-    def reload_gun():
-        nonlocal reloading, gun_img, ammo
-
-        if reloading:
-            return
-
-        reloading = True
-
-        def animate(index=0):
-            nonlocal reloading, gun_img, ammo
-
-            if index >= len(gunreload_frames):
-                reloading = False
-                ammo = max_ammo
-                return
-
-            frame = gunreload_frames_raw[index].resize(
-                (int(W*GUN_SCALE),
-                int(gun_img_raw.height * (W*GUN_SCALE)/gun_img_raw.width)),
-                Image.NEAREST
-            )
-
-            gun_img = ImageTk.PhotoImage(frame)
-
-            canvas.create_image(
-                W // 2,
-                H - int(H * GUN_OFFSET_Y) - int(bob_offset / 2),
-                image=gun_img
-            )
-
-            win.after(60, animate, index + 1)
-
-        animate()
-    
-    def trigger_fake_hack():
-        canvas.create_text(W//2, H//2 + 60,
-                           fill="white",
-                           font=("Consolas", 18),
-                           text="INTRUDER CONFIRMED")
-        win.after(300, lambda: (win.destroy(), start_fake_hack(root)))
-
-    def is_wall(x, y):
-        if x < 0 or y < 0 or int(y) >= len(MAP) or int(x) >= len(MAP[0]):
-            return True
-
-        cell = MAP[int(y)][int(x)]
-
-    # обычная дверь
-        if cell == "8":
-            return not has_key
-
-    # секретная стена
-        if cell == "S":
-            if has_key and has_gun:
-                return False
-            return True
-
-        return cell == "#"
-    last_step_time = 0
     def play_step():
-        winsound.PlaySound(
-            resource_path("data/step.wav"),
-            winsound.SND_FILENAME | winsound.SND_ASYNC
-    )
-    
-    def start_dialog_text(text):
-        nonlocal dialog_full_text, dialog_display_text
-        nonlocal dialog_index, dialog_typing
+        play_sound_effect(resource_path("data/step.wav"))
 
+    def start_dialog_text(text):
+        nonlocal dialog_full_text, dialog_display_text, dialog_index, dialog_typing
         dialog_full_text = text
         dialog_display_text = ""
         dialog_index = 0
         dialog_typing = True
 
-    def draw_minimap():
-        for y, row in enumerate(MAP):
-            for x, c in enumerate(row):
-                color = "#002200"
-                if c == "S":
-                    continue
-                if c == "#":
-                    color = "#006600"
-                elif c == "8":
-                    color = "#00ff00" if has_key else "#004400"
-                elif c == "K":
-                    color = "#00ff00"
-                elif c == "?":
-                    color = "#00ff00"
-
-                canvas.create_rectangle(
-                    x * MINIMAP_SCALE,
-                    y * MINIMAP_SCALE,
-                    (x+1)*MINIMAP_SCALE,
-                    (y+1)*MINIMAP_SCALE,
-                    fill=color,
-                    outline="#003300"
-                )
-
-        px = player_x * MINIMAP_SCALE
-        py = player_y * MINIMAP_SCALE
-
-        canvas.create_oval(px-4, py-4, px+4, py+4, fill="#00ff00")
-        canvas.create_line(
-            px, py,
-            px + math.cos(player_angle)*15,
-            py + math.sin(player_angle)*15,
-            fill="#00ff00"
-        )
-        
-        
-    
-    
-    
-    
-    sprite_cache = []
-
-    def render_sprite(frames, frame_index, world_x, world_y, scale, depth_buffer):
-        dx = world_x - player_x
-        dy = world_y - player_y
-        dist = math.hypot(dx, dy)
-        if dist < 0.3:
-            return
-
-        angle = math.atan2(dy, dx) - player_angle
-        
-        while angle > math.pi: angle -= 2*math.pi
-        while angle < -math.pi: angle += 2*math.pi
-
-        if abs(angle) > FOV / 2:
-            return
-
-        screen_x = (angle + FOV/2) / FOV * W
-        ray = int(screen_x * NUM_RAYS / W)
-        if ray < 0: ray = 0
-        if ray >= NUM_RAYS: ray = NUM_RAYS - 1
-
-    # проверка глубины
-        if depth_buffer[ray] < dist:
-            return
-
-        size = int(H / dist * scale)
-
-        if size > H:
-            size = H
-        frame = frames[frame_index]
-        scaled = frame.resize((size, size), Image.NEAREST)
-        tk_img = ImageTk.PhotoImage(scaled)
-        sprite_cache.append(tk_img)
-        canvas.create_image(screen_x, H//2 + bob_offset, image=tk_img)
-
-    def render_key(depth_buffer):
-        for y, row in enumerate(MAP):
-            for x, cell in enumerate(row):
-                if cell == "K":
-
-                    key_x = x + 0.5
-                    key_y = y + 0.5
-
-                    dx = key_x - player_x
-                    dy = key_y - player_y
-                    dist = math.hypot(dx, dy)
-
-                    angle = math.atan2(dy, dx) - player_angle
-                    if abs(angle) > FOV / 2:
-                        continue
-
-                    screen_x = (angle + FOV/2) / FOV * W
-                    ray = int(screen_x * NUM_RAYS / W)
-
-                    if ray < 0 or ray >= NUM_RAYS:
-                        continue
-
-                    if depth_buffer[ray] < dist:
-                        continue
-
-                    size = int(H / dist * 0.5)
-
-                    frame = key_frames[key_frame_index]
-                    scaled = frame.resize((size, size), Image.NEAREST)
-                    tk_img = ImageTk.PhotoImage(scaled)
-
-                    sprite_cache.append(tk_img)
-
-                    canvas.create_image(screen_x, H//2, image=tk_img)
-                    
-    def render_enemy(depth_buffer):
-        dx = enemy["x"] - player_x
-        dy = enemy["y"] - player_y
-        dist = math.hypot(dx, dy)
-
-        angle = math.atan2(dy, dx) - player_angle
-        if abs(angle) > FOV / 2:
-            return
-
-        screen_x = (angle + FOV/2) / FOV * W
-        ray = int(screen_x * NUM_RAYS / W)
-        if ray < 0 or ray >= NUM_RAYS:
-            return
-
-        if depth_buffer[ray] < dist:
-            return
-
-        size = int(H / dist * 0.6)
-
-        frame = enemy_frames[enemy_frame_index]
-        scaled = frame.resize((size, size), Image.NEAREST)
-        tk_img = ImageTk.PhotoImage(scaled)
-
-        sprite_cache.append(tk_img)
-
-        canvas.create_image(screen_x, H//2, image=tk_img)
-
-    def render_goal(depth_buffer):
-        if goal_x is None:
-            return
-
-        dx = goal_x - player_x
-        dy = goal_y - player_y
-        dist = math.hypot(dx, dy)
-
-        angle = math.atan2(dy, dx) - player_angle
-        if abs(angle) > FOV / 2:
-            return
-
-        screen_x = (angle + FOV/2) / FOV * W
-        ray = int(screen_x * NUM_RAYS / W)
-        if ray < 0 or ray >= NUM_RAYS:
-            return
-
-        if depth_buffer[ray] < dist:
-            return
-
-        size = int(H / dist * 0.7)
-
-        frame = goal_frames[goal_frame_index]
-        scaled = frame.resize((size, size), Image.NEAREST)
-        tk_img = ImageTk.PhotoImage(scaled)
-
-        sprite_cache.append(tk_img)
-
-        canvas.create_image(screen_x, H//2, image=tk_img)
-        
     def close_dialog():
-        nonlocal dialog_active, dialog_full_text
-        nonlocal dialog_display_text, dialog_index, dialog_typing
-
+        nonlocal dialog_active, dialog_full_text, dialog_display_text, dialog_index, dialog_typing
         dialog_active = False
         dialog_full_text = ""
         dialog_display_text = ""
         dialog_index = 0
         dialog_typing = False
-        
-    
 
-    def render():
-        nonlocal show_debug, last_frame_time, fps
-        nonlocal bob_phase, bob_offset, is_moving
-        nonlocal game_over, has_key, message
-        nonlocal enemy_frame_index, key_frame_index, goal_frame_index
-        nonlocal last_anim_time, meto_frame_index
-        nonlocal dialog_active, dialog_step, meto_triggered
-        nonlocal has_gun, gun_img
-        nonlocal dialog_full_text, dialog_display_text
-        nonlocal dialog_index, dialog_typing
-        nonlocal eye_event_active, eye_event_triggered, eye_event_end_time
-        nonlocal player_x, player_y, player_angle
-        if game_over:
+    def shoot_gun():
+        nonlocal gunshoot_animating, gunshoot_frame_index, ammo, reloading, shoot_acc
+        if not has_gun or gunshoot_animating or reloading:
             return
-        
+        if ammo <= 0:
+            start_reload()
+            return
+        ammo -= 1
+        gunshoot_animating = True
+        gunshoot_frame_index = 0
+        shoot_acc = 0.0
+
+    def start_reload():
+        nonlocal reloading, reload_anim_active, reload_anim_index, reload_acc
+        if reloading or not has_gun:
+            return
+        reloading = True
+        reload_anim_active = True
+        reload_anim_index = 0
+        reload_acc = 0.0
+
+    while running:
+        delta = clock.tick(120) / 1000.0
+        if delta <= 0:
+            delta = 1.0 / 60.0
         current_time = time.time()
-        delta = current_time - last_frame_time
         last_frame_time = current_time
-        
-        # === движение Doom style ===
+        if intro_active or start_cutscene_active:
+            start_time += delta
 
-        move_x = 0
-        move_y = 0
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    pause_action = run_pause_menu(screen, clock, root, W, H, title="Paused")
+                    if pause_action == "restart":
+                        next_action = "restart"
+                        running = False
+                    elif pause_action == "quit":
+                        next_action = "quit"
+                        running = False
+                    continue
+                elif dialog_active:
+                    ch = event.unicode
+                    if dialog_step == 0:
+                        if ch == "1":
+                            dialog_step = 1
+                            start_dialog_text(
+                                "What exactly do you mean?\n\n"
+                                "1) Iloveyou\n"
+                                "2) I love eating them\n"
+                                "3) Idk"
+                            )
+                        elif ch == "2":
+                            running = False
+                    elif dialog_step == 1:
+                        if ch == "1":
+                            start_dialog_text("Aww... Thats cute.. wait I`l give you a present")
+                            has_gun = True
+                            dialog_close_until = time.time() + 2.5
+                        elif ch == "2":
+                            start_dialog_text("What?! do you love it when we die and suffer?")
+                            game_over = True
+                            pending_action = "quit_delayed"
+                            pending_until = time.time() + 2.0
+                        elif ch == "3":
+                            start_dialog_text("Um.. OK")
+                            dialog_close_until = time.time() + 1.5
+                elif start_cutscene_active or intro_active:
+                    continue
+                elif event.key == pygame.K_r and not dialog_active:
+                    start_reload()
+                elif event.unicode == "=":
+                    show_debug = not show_debug
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if start_cutscene_active or intro_active:
+                    continue
+                if event.button == 1:
+                    shoot_gun()
 
-        if keys["w"]:
-            move_x += math.cos(player_angle) * SPEED
-            move_y += math.sin(player_angle) * SPEED
-            is_moving = True
+        if dialog_close_until and time.time() >= dialog_close_until:
+            dialog_close_until = 0.0
+            close_dialog()
 
-        if keys["s"]:
-            move_x -= math.cos(player_angle) * SPEED
-            move_y -= math.sin(player_angle) * SPEED
-            is_moving = True
+        if pending_action == "quit_delayed" and time.time() >= pending_until:
+            pygame.quit()
+            return
 
-        nx = player_x + move_x
-        ny = player_y + move_y
+        if pending_action == "fake_hack" and time.time() >= pending_until:
+            pygame.quit()
+            start_fake_hack(root)
+            return
 
-        if not is_wall(nx, ny):
-            player_x = nx
-            player_y = ny
+        if pending_action == "secret" and time.time() >= pending_until:
+            from secret_maze import start_secret_maze
 
-# поворот
-        if keys["a"]:
-            player_angle -= ROT_SPEED_KEYS
+            pygame.quit()
+            start_secret_maze(root)
+            return
 
-        if keys["d"]:
-            player_angle += ROT_SPEED_KEYS
+        if pending_action == "success" and time.time() >= pending_until:
+            pygame.quit()
+            on_success()
+            return
 
-        if delta > 0:
-            fps = int(1 / delta)
+        k = pygame.key.get_pressed()
+        keys["w"] = k[pygame.K_w]
+        keys["s"] = k[pygame.K_s]
+        keys["a"] = k[pygame.K_a]
+        keys["d"] = k[pygame.K_d]
 
-        if time.time() - last_anim_time > ANIM_SPEED:
-            enemy_frame_index = (enemy_frame_index + 1) % len(enemy_frames)
-            key_frame_index = (key_frame_index + 1) % len(key_frames)
-            goal_frame_index = (goal_frame_index + 1) % len(goal_frames)
+        if start_cutscene_active:
+            if (not intro_active) and not start_cutscene_started:
+                start_cutscene_started = True
+                start_cutscene_start_time = time.time()
 
-        # === анимация Meto-Pear ===
-            if meto_frames:
-                meto_frame_index = (meto_frame_index + 1) % len(meto_frames)
+            elapsed = max(0.0, time.time() - start_cutscene_start_time) if start_cutscene_started else 0.0
+            start_cutscene_open_t = 0.0
+            start_cutscene_close_t = 0.0
 
-            last_anim_time = time.time()
+            if elapsed < START_DOOR_OPEN_DUR:
+                start_cutscene_open_t = _clamp01(elapsed / START_DOOR_OPEN_DUR)
+            elif elapsed < START_DOOR_OPEN_DUR + START_MOVE_DUR:
+                start_cutscene_open_t = 1.0
+                move_ratio = _ease_out_cubic((elapsed - START_DOOR_OPEN_DUR) / START_MOVE_DUR)
+                player_x = player_spawn_x - player_start_cutscene_offset + player_start_cutscene_offset * move_ratio
+                player_y = player_spawn_y
+            elif elapsed < START_TOTAL_DUR:
+                start_cutscene_open_t = 1.0
+                start_cutscene_close_t = _clamp01((elapsed - START_DOOR_OPEN_DUR - START_MOVE_DUR) / START_DOOR_CLOSE_DUR)
+                player_x = player_spawn_x + 0.02
+                player_y = player_spawn_y
+            else:
+                player_x = player_spawn_x
+                player_y = player_spawn_y
+                start_cutscene_active = False
+                start_cutscene_open_t = 0.0
+                start_cutscene_close_t = 1.0
 
-        canvas.delete("all")
-        sprite_cache.clear()
-        depth_buffer = []
-        
-        # === ПОТОЛОК ===
-        if eye_event_active:
-            sky_color = "black"
-            floor_color = "black"
-        else:
-            sky_color = "#87CEEB"
-            floor_color = "#555555"
+            bob_offset = 0.0
+            bob_side_offset = 0.0
+            keys["w"] = keys["s"] = keys["a"] = keys["d"] = False
 
-        canvas.create_rectangle(0, 0, W, H//2, fill=sky_color, outline="")
-        canvas.create_rectangle(0, H//2, W, H, fill=floor_color, outline="")
-        
-        
-        # === печать текста ===
+        elif not game_over and not pending_action:
+            move_x = 0.0
+            move_y = 0.0
+            is_moving = False
+            if keys["w"]:
+                move_x += math.cos(player_angle) * SPEED
+                move_y += math.sin(player_angle) * SPEED
+                is_moving = True
+            if keys["s"]:
+                move_x -= math.cos(player_angle) * SPEED
+                move_y -= math.sin(player_angle) * SPEED
+                is_moving = True
+
+            nx = player_x + move_x
+            ny = player_y + move_y
+            if not is_wall(nx, ny):
+                player_x = nx
+                player_y = ny
+
+            want_turn = 0.0
+            if keys["a"]:
+                want_turn -= 1.0
+            if keys["d"]:
+                want_turn += 1.0
+            ds = delta / ROT_SUBSTEPS
+            for _ in range(ROT_SUBSTEPS):
+                turn_smooth += (want_turn - turn_smooth) * min(1.0, TURN_SMOOTH * ds)
+                player_angle += turn_smooth * ROT_RATE * ds
+
+            if delta > 0:
+                fps = int(1 / delta)
+
+            if time.time() - last_anim_time > ANIM_SPEED:
+                enemy_frame_index = (enemy_frame_index + 1) % len(enemy_frames)
+                key_frame_index = (key_frame_index + 1) % len(key_frames)
+                goal_frame_index = (goal_frame_index + 1) % len(goal_frames)
+                if meto_frames:
+                    meto_frame_index = (meto_frame_index + 1) % len(meto_frames)
+                last_anim_time = time.time()
+
+            enemy["x"] += 0.03 * enemy["dir"]
+            if enemy["x"] < enemy["min_x"] or enemy["x"] > enemy["max_x"]:
+                enemy["dir"] *= -1
+
+            if is_moving:
+                bob_phase += 0.25
+                bob_offset = math.sin(bob_phase) * 10 * bob_strength
+                bob_side_offset = math.sin(bob_phase * 0.6) * 4 * bob_strength
+            else:
+                bob_offset = 0.0
+                bob_side_offset = 0.0
+
+            if not eye_event_triggered and math.hypot(player_x - eye_zone_x, player_y - eye_zone_y) < eye_zone_radius:
+                eye_event_active = True
+                eye_event_triggered = True
+                eye_event_end_time = time.time() + 4
+            if eye_event_active and time.time() > eye_event_end_time:
+                eye_event_active = False
+
+            if is_moving and time.time() - last_step_time > 0.4:
+                play_step()
+                last_step_time = time.time()
+
+            for worm in orbworms:
+                if not worm["started"]:
+                    if current_time > worm["start_delay"]:
+                        worm["started"] = True
+                    else:
+                        continue
+                worm["x"] += worm["speed"]
+                if worm["x"] > len(MAP_ROWS[0]) + 5:
+                    worm["x"] = -5
+                    worm["start_delay"] = current_time + random.random() * 3
+                    worm["started"] = False
+
+            if math.hypot(player_x - enemy["x"], player_y - enemy["y"]) < 0.4:
+                game_over = True
+                caught_by_enemy = True
+                pending_action = "fake_hack"
+                pending_until = time.time() + 1.2
+
+            if MAP_ROWS[int(player_y)][int(player_x)] == "K":
+                has_key = True
+                message = "KEY ACQUIRED"
+                py, px = int(player_y), int(player_x)
+                row = MAP_ROWS[py]
+                MAP_ROWS[py] = row[:px] + "." + row[px + 1 :]
+
+            remaining = max(0, TIME_LIMIT - int(time.time() - start_time))
+            if remaining <= 0:
+                game_over = True
+                caught_by_enemy = False
+                pending_action = "fake_hack"
+                pending_until = time.time() + 1.5
+
+            if MAP_ROWS[int(player_y)][int(player_x)] == "S" and has_key and has_gun:
+                game_over = True
+                pending_action = "secret"
+                pending_until = time.time() + 0.05
+
+            if goal_x and int(player_x) == int(goal_x) and int(player_y) == int(goal_y):
+                game_over = True
+                pending_action = "success"
+                pending_until = time.time() + 1.2
+
+            if meto_x and not meto_triggered and math.hypot(player_x - meto_x, player_y - meto_y) < 0.8:
+                dialog_active = True
+                dialog_step = 0
+                start_dialog_text("Hello! Im Meto-pear!\nDo you like pears?\n\n1) Yes\n2) No")
+                meto_triggered = True
+
         if dialog_active and dialog_typing:
             if dialog_index < len(dialog_full_text):
                 dialog_display_text += dialog_full_text[dialog_index]
@@ -573,386 +540,326 @@ def start_hack_maze(root, hack_window=None, on_success=lambda: None):
             else:
                 dialog_typing = False
 
-    # === движение врага ===
-        enemy["x"] += 0.03 * enemy["dir"]
-        if enemy["x"] < enemy["min_x"] or enemy["x"] > enemy["max_x"]:
-            enemy["dir"] *= -1
-            
-        # === покачивание камеры ===
-        if is_moving:
-            bob_phase += 0.3
-            bob_offset = math.sin(bob_phase) * 16          # вертикальное покачивание
-            bob_side_offset = math.sin(bob_phase*0.6) * 8 # горизонтальное покачивание
+        shoot_frame_time = 0.05
+        if gunshoot_animating:
+            shoot_acc += delta
+            while shoot_acc >= shoot_frame_time and gunshoot_animating:
+                shoot_acc -= shoot_frame_time
+                gunshoot_frame_index += 1
+                if gunshoot_frame_index >= len(gunshoot_frames_raw):
+                    gunshoot_animating = False
+                    gunshoot_frame_index = 0
+
+        reload_frame_time = 0.06
+        if reload_anim_active and reloading:
+            reload_acc += delta
+            while reload_acc >= reload_frame_time and reloading:
+                reload_acc -= reload_frame_time
+                reload_anim_index += 1
+                if reload_anim_index >= len(gunreload_frames_raw):
+                    reloading = False
+                    reload_anim_active = False
+                    reload_anim_index = 0
+                    ammo = max_ammo
+
+        sprite_cache = []
+        if eye_event_active:
+            sky_color = "black"
+            floor_color = "black"
         else:
-            bob_offset = 0
-            bob_side_offset = 0
-            
-        if (not eye_event_triggered and
-            math.hypot(player_x - eye_zone_x, player_y - eye_zone_y) < eye_zone_radius):
+            sky_color = "#87CEEB"
+            floor_color = "#555555"
+        draw_sky_floor_split(game_surface, game_view_w, game_view_h, sky_color, floor_color)
 
-            eye_event_active = True
-            eye_event_triggered = True
-            eye_event_end_time = time.time() + 4
+        current_fov = get_fov_radians()
+        depth_buffer = raycast_step_sampling_walls(
+            game_surface,
+            game_view_w,
+            game_view_h,
+            num_rays,
+            current_fov,
+            MAX_DEPTH,
+            RAY_STEP,
+            player_x,
+            player_y,
+            player_angle,
+            bob_offset,
+            bob_side_offset,
+            is_wall,
+            eye_event_active,
+            eyewall_raw,
+            sprite_cache,
+        )
 
-        if eye_event_active and time.time() > eye_event_end_time:
-            eye_event_active = False
-        
-        nonlocal last_step_time
+        render_sprite_hack_square(
+            game_surface,
+            game_view_w,
+            game_view_h,
+            num_rays,
+            current_fov,
+            player_x,
+            player_y,
+            player_angle,
+            bob_offset,
+            enemy_frames,
+            enemy_frame_index,
+            enemy["x"],
+            enemy["y"],
+            0.6,
+            depth_buffer,
+            sprite_cache,
+        )
 
-        if is_moving:
-            if time.time() - last_step_time > 0.4:
-                play_step()
-                last_step_time = time.time()
-            
-                # === движение орб-червей ===
-        current_time = time.time()
-
-        for worm in orbworms:
-
-            # задержка старта
-            if not worm["started"]:
-                if current_time > worm["start_delay"]:
-                    worm["started"] = True
-                else:
-                    continue
-
-            worm["x"] += worm["speed"]
-
-            if worm["x"] > len(MAP[0]) + 5:
-                worm["x"] = -5
-                worm["start_delay"] = current_time + random.random() * 3
-                worm["started"] = False
-
-    # детект
-        if math.hypot(player_x - enemy["x"], player_y - enemy["y"]) < 0.4:
-            game_over = True
-            canvas.create_text(W//2, H//2, fill="red",
-                               font=("Consolas", 40), text="DETECTED")
-            win.after(1200, trigger_fake_hack)
-            return
-
-    # === рейкастинг ===
-        for r in range(NUM_RAYS):
-            a = player_angle - FOV/2 + FOV*r/NUM_RAYS
-            d = 0
-            while d < MAX_DEPTH:
-                d += 0.05
-                tx = player_x + math.cos(a)*d
-                ty = player_y + math.sin(a)*d
-                if is_wall(tx, ty):
-                    break
-            depth_buffer.append(d)
-
-            
-
-            h = min(H, H/(d+0.1))
-            g = int(255/(1+d*d*0.12))
-            x = r * W / NUM_RAYS
-
-            if eye_event_active:
-
-                slice_width = int(W/NUM_RAYS)+2
-                slice_height = int(h)
-
-    # вырезаем вертикальный кусок из eyeball текстуры
-                tex_w, tex_h = eyewall_raw.size
-                tex_x = int((r / NUM_RAYS) * tex_w)
-
-                column = eyewall_raw.crop((tex_x, 0, tex_x+1, tex_h))
-                column = column.resize((slice_width, slice_height), Image.NEAREST)
-
-                tk_col = ImageTk.PhotoImage(column)
-                sprite_cache.append(tk_col)
-
-                canvas.create_image(
-                    x + bob_side_offset,
-                    H/2 + bob_offset,
-                    image=tk_col
-                )
-
-            else:
-                canvas.create_line(
-                    x + bob_side_offset,
-                    H/2 - h/2 + bob_offset,
-                    x + bob_side_offset,
-                    H/2 + h/2 + bob_offset,
-                    fill=f"#00{g:02x}00",
-                    width=W/NUM_RAYS+1
-                )
-
-    # === спрайты ===
-        render_sprite(enemy_frames, enemy_frame_index, enemy["x"], enemy["y"], 0.6, depth_buffer)
-
-        for y, row in enumerate(MAP):
+        for y, row in enumerate(MAP_ROWS):
             for x, cell in enumerate(row):
                 if cell == "K":
-                    render_sprite(key_frames, key_frame_index, x+0.5, y+0.5, 0.5, depth_buffer)
+                    render_sprite_hack_square(
+                        game_surface,
+                        game_view_w,
+                        game_view_h,
+                        num_rays,
+                        current_fov,
+                        player_x,
+                        player_y,
+                        player_angle,
+                        bob_offset,
+                        key_frames,
+                        key_frame_index,
+                        x + 0.5,
+                        y + 0.5,
+                        0.5,
+                        depth_buffer,
+                        sprite_cache,
+                    )
 
         if goal_x:
-            render_sprite(goal_frames, goal_frame_index, goal_x, goal_y, 0.7, depth_buffer)
+            render_sprite_hack_square(
+                game_surface,
+                game_view_w,
+                game_view_h,
+                num_rays,
+                current_fov,
+                player_x,
+                player_y,
+                player_angle,
+                bob_offset,
+                goal_frames,
+                goal_frame_index,
+                goal_x,
+                goal_y,
+                0.7,
+                depth_buffer,
+                sprite_cache,
+            )
 
-    # === Meto-Pear рендер ===
         if meto_x:
-            render_sprite(meto_frames, meto_frame_index, meto_x, meto_y, 0.6, depth_buffer)
-            
-                # === рендер орб-червей ===
-                # === рендер орб-червей (лесенка) ===
+            render_sprite_hack_square(
+                game_surface,
+                game_view_w,
+                game_view_h,
+                num_rays,
+                current_fov,
+                player_x,
+                player_y,
+                player_angle,
+                bob_offset,
+                meto_frames,
+                meto_frame_index,
+                meto_x,
+                meto_y,
+                0.6,
+                depth_buffer,
+                sprite_cache,
+            )
+
         for worm in orbworms:
             if not worm["started"]:
                 continue
-
             texture = orb_textures[worm["color"]]
-
             for i in range(worm["length"]):
-                # ближе друг к другу
                 segment_x = worm["x"] - i * 0.09
-
-                pattern = [0, -0.25, -0.5, -0.25]  # форма ступеньки
-
-                phase = int(worm["x"] * 8)    # скорость анимации
-                offset = pattern[(i + phase) % len(pattern)]
-
                 segment_y = worm["base_y"] + math.sin(i * 0.6 + worm["x"] * 4) * 0.3
-
-                render_sprite(
+                render_sprite_hack_square(
+                    game_surface,
+                    game_view_w,
+                    game_view_h,
+                    num_rays,
+                    current_fov,
+                    player_x,
+                    player_y,
+                    player_angle,
+                    bob_offset,
                     [texture],
                     0,
                     segment_x,
                     segment_y,
                     0.42,
-                    depth_buffer
+                    depth_buffer,
+                    sprite_cache,
                 )
 
-        draw_minimap()
-        
-        # === запуск диалога Meto-Pear ===
-        if (meto_x and
-            not meto_triggered and
-            math.hypot(player_x - meto_x, player_y - meto_y) < 0.8):
+        if start_cutscene_active:
+            if start_cutscene_open_t < 1.0:
+                door_progress = 1.0 - _ease_out_cubic(start_cutscene_open_t)
+            elif start_cutscene_close_t > 0.0:
+                door_progress = _ease_out_cubic(start_cutscene_close_t)
+            else:
+                door_progress = 0.0
 
-            dialog_active = True
-            dialog_step = 0
-            start_dialog_text(
-                "Hello! Im Meto-pear!\n"
-                "Do you like pears?\n\n"
-                "1) Yes\n"
-                "2) No"
+            fwd_x = math.cos(player_angle)
+            fwd_y = math.sin(player_angle)
+            right_x = -fwd_y
+            right_y = fwd_x
+            door_front_dist_open = 0.92
+            door_front_dist_closed = 0.62
+            door_front_dist = door_front_dist_open + (door_front_dist_closed - door_front_dist_open) * door_progress
+            half_sep_open = 0.88
+            half_sep_closed = 0.17
+            half_sep = half_sep_open + (half_sep_closed - half_sep_open) * door_progress
+            center_x = player_x + fwd_x * door_front_dist
+            center_y = player_y + fwd_y * door_front_dist
+            left_sx = center_x - right_x * half_sep
+            left_sy = center_y - right_y * half_sep
+            right_sx = center_x + right_x * half_sep
+            right_sy = center_y + right_y * half_sep
+            door_frame_idx = int(_clamp01(door_progress) * (len(door_left_frames) - 1))
+            render_sprite_hack_square(
+                game_surface,
+                game_view_w,
+                game_view_h,
+                num_rays,
+                current_fov,
+                player_x,
+                player_y,
+                player_angle,
+                bob_offset,
+                door_left_frames,
+                door_frame_idx,
+                left_sx,
+                left_sy,
+                1.12,
+                depth_buffer,
+                sprite_cache,
             )
-            meto_triggered = True
+            render_sprite_hack_square(
+                game_surface,
+                game_view_w,
+                game_view_h,
+                num_rays,
+                current_fov,
+                player_x,
+                player_y,
+                player_angle,
+                bob_offset,
+                door_right_frames,
+                door_frame_idx,
+                right_sx,
+                right_sy,
+                1.12,
+                depth_buffer,
+                sprite_cache,
+            )
 
-    # === ключ ===
-        if MAP[int(player_y)][int(player_x)] == "K":
-            has_key = True
-            message = "KEY ACQUIRED"
-            row = MAP[int(player_y)]
-            MAP[int(player_y)] = row.replace("K", ".")
+        if (not start_cutscene_active) and has_gun:
+            gs = build_gun_surface(gun_img_raw)
+            if gunshoot_animating:
+                fi = min(gunshoot_frame_index, len(gunshoot_frames_raw) - 1)
+                gs = build_gun_surface(gunshoot_frames_raw[fi])
+            elif reloading and reload_anim_active:
+                fi = min(reload_anim_index, len(gunreload_frames_raw) - 1)
+                gs = build_gun_surface(gunreload_frames_raw[fi])
+            gun_y = game_view_h - GUN_BOTTOM_MARGIN - int(bob_offset * 0.35)
+            game_surface.blit(gs, gs.get_rect(midbottom=(game_view_w // 2, gun_y)))
 
-    # === таймер ===
+        blit_game_view_upscaled(game_surface, screen, W, H)
+
         remaining = max(0, TIME_LIMIT - int(time.time() - start_time))
-        canvas.create_text(
-            W//2, 20,
-            fill="#ff0000",
-            font=("Terminal", 16),
-            text=f"W/S MOVE  A/D or MOUSE TURN  TIME {remaining}"
+        screen.blit(
+            font_ui.render(f"W/S MOVE  A/D TURN  TIME {remaining}", True, (255, 0, 0)),
+            (W // 2 - 200, 20),
         )
-
-        if remaining <= 0:
-            game_over = True
-            canvas.create_text(W//2, H//2, fill="red",
-                               font=("Terminal", 40), text="ACCESS DENIED")
-            win.after(1500, trigger_fake_hack)
-            return
-        # === секретный телепорт ===
-        if MAP[int(player_y)][int(player_x)] == "S":
-            if has_key and has_gun:
-                win.destroy()
-                try:
-                    from secret_maze import start_secret_maze
-                    start_secret_maze(root)
-                except:
-                    print("Secret maze not found")
-                return
-        
-    # === победа ===
-        if goal_x and int(player_x) == int(goal_x) and int(player_y) == int(goal_y):
-            game_over = True
-            canvas.create_text(W//2, H//2, fill="#00ff00",
-                               font=("Terminal", 40), text="THEME UNLOCKED")
-            win.after(1200, lambda: (win.destroy(), on_success()))
-            return
 
         if message:
-            canvas.create_text(W//2, 60,
-                               fill="#00ff00",
-                               font=("Terminal", 18),
-                               text=message)
-        if dialog_active:
-            canvas.create_rectangle(
-                W*0.1, H*0.65,
-                W*0.9, H*0.9,
-                fill="black",
-                outline="#00ff00",
-                width=3
-            )
+            screen.blit(font_ui.render(message, True, (0, 255, 0)), (W // 2 - 80, 60))
 
-            canvas.create_text(
-                W//2,
-                int(H*0.775),
-                text=dialog_display_text + (" █" if dialog_typing else ""),
-                fill="#00ff00",
-                font=("Terminal", 20),
-                width=W*0.75
-            )
-            # === оружие в руках ===
-          
+        if dialog_active:
+            pygame.draw.rect(screen, (0, 0, 0), (int(W * 0.1), int(H * 0.65), int(W * 0.8), int(H * 0.25)), width=3)
+            lines = (dialog_display_text + (" █" if dialog_typing else "")).split("\n")
+            yy = int(H * 0.68)
+            for line in lines:
+                screen.blit(font_dialog.render(line, True, (0, 255, 0)), (W // 2 - 280, yy))
+                yy += 24
+
         if has_gun:
-            nonlocal gun_img
-            if gun_img is None:
-        # Масштабируем пистолет
-                w, h = gun_img_raw.size
-                new_w = int(W * GUN_SCALE)
-                scale_factor = new_w / w
-                new_h = int(h * scale_factor)
-                gun_img_resized = gun_img_raw.resize((new_w, new_h), Image.NEAREST)
-                gun_img = ImageTk.PhotoImage(gun_img_resized)
+            screen.blit(font_ui.render(f"{ammo}/{max_ammo}", True, (0, 255, 0)), (W - 120, H - 40))
 
-    # Рисуем оружие внизу, с учётом покачивания камеры
-            canvas.create_image(
-                W // 2,
-                H - int(H * GUN_OFFSET_Y) - int(bob_offset / 2),
-                image=gun_img
-            )
-            canvas.create_text(
-                W - 120,
-                H - 40,
-                fill="#00ff00",
-                font=("Terminal", 18),
-                text=f"{ammo}/{max_ammo}"
-            )
-
-
-        is_moving = False
-        
-        if show_debug:
-            canvas.create_rectangle(
-                10, 10, 320, 100,
-                fill="black",
-                outline="#00ff00"
-            )
-
-            canvas.create_text(
-                20, 25,
-                anchor="nw",
-                fill="#00ff00",
-                font=("Consolas", 14),
-                text=f"FPS: {fps}"
-            )
-
-            canvas.create_text(
-                20, 45,
-                anchor="nw",
-                fill="#00ff00",
-                font=("Consolas", 14),
-                text=f"X: {player_x:.2f}"
-            )
-
-            canvas.create_text(
-                20, 65,
-                anchor="nw",
-                fill="#00ff00",
-                font=("Consolas", 14),
-                text=f"Y: {player_y:.2f}"
-            )
-
-            canvas.create_text(
-                20, 85,
-                anchor="nw",
-                fill="#00ff00",
-                font=("Consolas", 14),
-                text=f"ANGLE: {player_angle:.2f}"
-            )
-            
-            # === прицел ===
         cross_size = 8
-        cross_color = "#00ff00"
+        pygame.draw.line(screen, (0, 255, 0), (W // 2 - cross_size, H // 2), (W // 2 + cross_size, H // 2), 2)
+        pygame.draw.line(screen, (0, 255, 0), (W // 2, H // 2 - cross_size), (W // 2, H // 2 + cross_size), 2)
 
-        canvas.create_line(
-            W//2 - cross_size, H//2,
-            W//2 + cross_size, H//2,
-            fill=cross_color,
-            width=2
-        )
+        if show_debug or get_show_fps():
+            pygame.draw.rect(screen, (0, 0, 0), (10, 10, 320, 100), width=1)
+            lines = [f"FPS: {fps}"]
+            if show_debug:
+                lines.extend(
+                    [
+                        f"X: {player_x:.2f}",
+                        f"Y: {player_y:.2f}",
+                        f"ANGLE: {player_angle:.2f}",
+                    ]
+                )
+            for i, line in enumerate(lines):
+                screen.blit(font_dbg.render(line, True, (0, 255, 0)), (20, 25 + i * 20))
 
-        canvas.create_line(
-            W//2, H//2 - cross_size,
-            W//2, H//2 + cross_size,
-            fill=cross_color,
-            width=2
-        )
+        if game_over and pending_action == "fake_hack" and time.time() < pending_until:
+            msg = "DETECTED" if caught_by_enemy else "ACCESS DENIED"
+            surf = font_ui_big.render(msg, True, (255, 0, 0))
+            screen.blit(surf, (W // 2 - surf.get_width() // 2, H // 2 - 40))
+        if game_over and pending_action == "success" and time.time() < pending_until:
+            surf = font_ui_big.render("THEME UNLOCKED", True, (0, 255, 0))
+            screen.blit(surf, (W // 2 - surf.get_width() // 2, H // 2 - 40))
 
-        win.after(16, render)
+        if intro_active:
+            progress = (time.time() - intro_start) / intro_duration
+            if progress >= 1:
+                intro_active = False
+            else:
+                for p in pixel_grid:
+                    x, y, active = p
+                    if active and random.random() < progress * 0.2:
+                        p[2] = False
+                    if p[2]:
+                        shade = random.randint(0, 120)
+                        pygame.draw.rect(screen, (shade, shade, shade), (x, y, pixel_size, pixel_size))
+            if intro_active:
+                if intro_index < len(intro_text):
+                    intro_index += 1
+                shown = intro_text[:intro_index]
+                if intro_index >= len(intro_text):
+                    fade_started = True
+                size = 42
+                if fade_started:
+                    fade_time = max(0, time.time() - intro_start - 2)
+                    remain_ratio = max(0, 1 - fade_time * 0.25)
+                    visible_len = int(len(shown) * remain_ratio)
+                    shown = shown[:visible_len]
+                    chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#@!?$%"
+                    glitched = ""
+                    for c in shown:
+                        if random.random() < 0.15 * fade_time:
+                            glitched += random.choice(chars)
+                        else:
+                            glitched += c
+                    shown = glitched
+                    size = int(42 * remain_ratio)
+                    if size <= 6 or visible_len <= 0:
+                        intro_active = False
+                if intro_active and size > 6:
+                    surf = font_intro.render(shown, True, (0, 255, 136))
+                    screen.blit(surf, (W // 2 - surf.get_width() // 2, H // 2 - surf.get_height() // 2))
 
-    def key_press(e):
-        nonlocal dialog_active, dialog_step
-        nonlocal has_gun, game_over
-        nonlocal show_debug
+        pygame.display.flip()
 
-        key = e.keysym.lower()
-
-    # === диалог ===
-        if dialog_active:
-
-            if dialog_step == 0:
-                if e.char == "1":
-                    dialog_step = 1
-                    start_dialog_text(
-                        "What exactly do you mean?\n\n"
-                        "1) Iloveyou\n"
-                        "2) I love eating them\n"
-                        "3) Idk"
-                    )
-                elif e.char == "2":
-                    win.destroy()
-
-            elif dialog_step == 1:
-                if e.char == "1":
-                    start_dialog_text(
-                        "Aww... Thats cute.. wait I`l give you a present"
-                    )
-                    has_gun = True
-                    win.after(2500, close_dialog)
-
-                elif e.char == "2":
-                    start_dialog_text(
-                        "What?! do you love it when we die and suffer?"
-                    )
-                    game_over = True
-                    win.after(2000, win.destroy)
-
-                elif e.char == "3":
-                    start_dialog_text("Um.. OK")
-                    win.after(1500, close_dialog)
-
-            return
-
-    # === управление (только запись состояния клавиш) ===
-        if key in keys:
-            keys[key] = True
-
-    # === debug ===
-        if e.char == "=":
-            show_debug = not show_debug
-            
-    def key_release(e):
-        key = e.keysym.lower()
-        if key in keys:
-            keys[key] = False
-
-    win.bind("<KeyPress>", key_press)
-    win.bind("<KeyRelease>", key_release)
-    win.bind("<Button-1>", lambda e: shoot_gun())
-    
-    
-    
-
-    render()
+    pygame.quit()
+    if next_action == "restart":
+        return start_hack_maze(root, hack_window=hack_window, on_success=on_success)

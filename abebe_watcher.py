@@ -519,4 +519,19 @@ class AbebeWatcher:
         if self.text_win.winfo_exists():
             unregister(self.text_win)
             self.text_win.destroy()
+    
+    # ===================== УПРАВЛЕНИЕ ВИДИМОСТЬЮ =====================
+    def hide_for_game(self):
+        """Скрыть окна во время игры"""
+        if self.win.winfo_exists():
+            self.win.withdraw()
+        if self.text_win.winfo_exists():
+            self.text_win.withdraw()
+    
+    def show_after_game(self):
+        """Показать окна после игры"""
+        if self.win.winfo_exists():
+            self.win.deiconify()
+        if self.text_win.winfo_exists():
+            self.text_win.deiconify()
             

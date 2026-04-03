@@ -123,7 +123,9 @@ def show_hack_decoder(root, theme):
         def unlocked():
             show_password_theme()
 
-        start_hack_maze(root, win, unlocked)
+        from game_launcher import run_pygame_session
+
+        run_pygame_session(root, start_hack_maze, root, win, unlocked)
 
     
 

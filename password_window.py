@@ -19,7 +19,10 @@ from window_registry import register, unregister
 from data.events.creeper_event import CreeperEvent
 from secret_maze import start_secret_maze
 from testing_maze import start_testing_maze
+from tutor_maze import start_tutor_maze
 import random
+from city_maze import start_city_maze
+from game_launcher import run_pygame_session
 
 from trust_system import TrustSystem
 from abebe_watcher import AbebeWatcher
@@ -128,7 +131,9 @@ def show_help_window(root):
         "!dev - show developer info",
         "!reset - reset game (clear password history & watcher)",
         "!sound on/off - toggle background music",
-        "!easteregg - show hidden image"
+        "!easteregg - show hidden image",
+        "!tut - open tutor / training maze",
+        "!city - open city maze",
     ]
 
     for cmd in commands:
@@ -578,23 +583,22 @@ def show_password_window(root):
             # ===== RESET =====
             elif pwd == "!reset":
                 password_history.clear()
-                
-            elif pwd =="!sec":
-                start_secret_maze(root)
-            elif pwd =="!test":
-                start_testing_maze(root)
-
-    # сброс trust system
                 trust.trust = 50
                 trust.suspicion = 0
                 trust.update_ui()
-
-    # сброс watcher
                 abebe.destroy()
                 abebe = AbebeWatcher(root, trust)
-
                 show_status("System reset completed.", color="lime")
-                
+
+            elif pwd =="!sec":
+                run_pygame_session(root, start_secret_maze, root)
+            elif pwd =="!test":
+                run_pygame_session(root, start_testing_maze, root)
+            elif pwd == "!tut":
+                run_pygame_session(root, start_tutor_maze, root)
+            elif pwd == "!city":
+                run_pygame_session(root, start_city_maze, root)
+
             elif pwd == "!summonnotcreep":
                 CreeperEvent(root, trust)
 
@@ -715,5 +719,4 @@ def show_password_window(root):
         width=16
     )
     confirm_btn.pack(pady=15)
-
 
