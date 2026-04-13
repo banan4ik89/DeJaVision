@@ -4,11 +4,15 @@ import random
 import sys
 import time
 import wave
+import copy
 
 import pygame
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from background_music import play_overlay_music, play_sound_effect, stop_overlay_music, update_music
+import bomb as bomb_logic
+import hexagaze as hexagaze_logic
+import mannequin as mannequin_logic
 from maze_pygame_common import GAME_VIEW_H, GAME_VIEW_W, blit_game_view_upscaled
 from pause_menu import run_pause_menu
 from raycast_engine import NUM_RAYS, RaycastEngine, draw_floor_ceiling, pil_to_surface
@@ -22,41 +26,85 @@ from user_settings import (
     get_show_fps,
     get_view_bob,
 )
+from utils import get_exe_dir
 
 SPEED = 0.17
 GUN_BOTTOM_MARGIN = -14
 MOUSE_SENSITIVITY = 0.0035
+HAND_SWAP_DURATION = 0.18
 
 MINIMAP_SCALE = 14
+DEJA_VU_MAX_CHARGE = 8.0
+DEJA_VU_RECHARGE_DELAY = 1.5
+DEJA_VU_FAST_CHARGE_CAP = 3.0
+DEJA_VU_FAST_CHARGE_TIME = 9.0
+DEJA_VU_SLOW_CHARGE_TIME = 21.0
+DEJA_VU_MIN_ACTIVATION = 2.0
+DEJA_VU_GHOST_INTERVAL = 0.08
+DEJA_VU_RETURN_FADE = 0.75
+DEJA_VU_GHOST_LIFETIME = 9.0
+DEJA_VU_ENTER_FADE = 0.5
+DEJA_VU_SPEED_BOOST = 1.18
+PLAYER_MAX_HEALTH = 100
+PUNCH_DAMAGE = 0.5
+PUNCH_RANGE_CELLS = 1.0
+PUNCH_AIM_TOLERANCE = 0.22
+PUNCH_COOLDOWN = 0.75
+HEXAGAZE_RADIUS_CELLS = 9
+HEXAGAZE_RADIUS_MIN = 8
+HEXAGAZE_RADIUS_MAX = 10
+HEXAGAZE_CLOSE_SIGHT_RADIUS = 0.9
+HEXAGAZE_FIRST_SHOT_DELAY = 0.3
+HEXAGAZE_BURST_DELAY = 0.14
+HEXAGAZE_BURST_SIZE = 3
+HEXAGAZE_BURST_PAUSE = 1.0
+HEXAGAZE_PROJECTILE_SPEED = 7.4
+HEXAGAZE_PROJECTILE_DAMAGE = 10
+HEXAGAZE_PLAYER_HIT_RADIUS = 0.34
+HEXAGAZE_BLOCK_RADIUS = 0.42
+HEXAGAZE_ENTRY_BURST_COUNT = 3
+HEXAGAZE_ENTRY_BURST_SPEED = 10.8
+HEXAGAZE_HOMING_TURN_RATE = 3.8
+HEXAGAZE_SNAKE_TURN_RATE = 3.2
+HEXAGAZE_SNAKE_WAVE_SPEED = 8.0
+HEXAGAZE_SNAKE_WAVE_AMPLITUDE = 0.85
+HEXAGAZE_ROLL_FRAME_TIME = 0.06
+HEXAGAZE_ROLL_DURATION = 2.0
+HEXAGAZE_POST_ATTACK_WAIT = 4.0
 
 MAP = [
-    ".........###............",
-    "##########P#############",
-    "#......................#",
-    "#......................#",
-    "#......................#",
-    "#..................M...#",
-    "#......................#",
-    "#......................#",
-    "#......................#",
-    "#......................#",
-    "#......................#",
-    "#......................#",
-    "#.....................##",
-    "#...................G.N#",
-    "#.....................##",
-    "#......................#",
-    "#......................#",
-    "########################",
+    ".........###...............",
+    "##########P################",
+    "#.........................#",
+    "#.........................#",
+    "#.........................#",
+    "#.....................M...#",
+    "#.........................#",
+    "#.........................#",
+    "#.........................#",
+    "#.........................#",
+    "#.........................#",
+    "#.........................#",
+    "#........................##",
+    "#.....................BG.N#",
+    "#........................##",
+    "#.........................#",
+    "#.........................#",
+    "#.........................#",
+    "#.........................#",
+    "#.........................#",
+    "###########...............#",
+    "#C........................#",
+    "#.........................#",
+    "#.........................#",
+    "#.........................#",
+    "#.........................#",
+    "###########################",
 ]
 
 
 def resource_path(relative_path):
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
+    return os.path.join(get_exe_dir(), relative_path)
 
 
 def load_gif_frames(path):
@@ -83,6 +131,23 @@ def is_wall(x, y):
     if cell == "#":
         return True
     return False
+
+
+def get_floor_height(x, y):
+    if x < 0 or y < 0:
+        return 0.0
+    if int(y) >= len(MAP):
+        return 0.0
+    if int(x) >= len(MAP[0]):
+        return 0.0
+    cell = MAP[int(y)][int(x)]
+    if cell == "N":
+        return 0.45
+    if cell in {"B", "G", "C", "M"}:
+        return 0.2
+    if cell == "P":
+        return 0.3
+    return 0.0
 
 
 def wrap_angle(angle):
@@ -113,6 +178,24 @@ def _make_font(size, bold=False):
         except Exception:
             continue
     return pygame.font.Font(None, size)
+
+
+def _clamp01(value):
+    return max(0.0, min(1.0, float(value)))
+
+
+def generate_hexagaze_blind_offsets(radius):
+    candidates = []
+    for ox in range(-radius, radius + 1):
+        for oy in range(-radius, radius + 1):
+            if ox == 0 and oy == 0:
+                continue
+            dist = math.hypot(ox, oy)
+            if 1.0 <= dist <= radius + 0.01:
+                candidates.append((ox, oy))
+    random.shuffle(candidates)
+    blind_count = max(6, min(len(candidates), radius * 3))
+    return candidates[:blind_count]
 
 
 def start_tutor_maze(root=None):
@@ -164,7 +247,7 @@ def start_tutor_maze(root=None):
     player_start_cutscene_offset = 2.0
     player_x = player_spawn_x - player_start_cutscene_offset
     player_y = player_spawn_y
-    player_z = 0.0
+    player_z = get_floor_height(player_x, player_y)
     player_angle = 0.0
     start_door_anchor_x = player_x + math.cos(player_angle) * 0.62
     start_door_anchor_y = player_y + math.sin(player_angle) * 0.62
@@ -172,8 +255,21 @@ def start_tutor_maze(root=None):
     gun_img_raw = Image.open(resource_path("data/gifs/hands/gun.png")).convert("RGBA")
     gunshoot_frames_raw = load_gif_frames(resource_path("data/gifs/hands/gunshoot.gif"))
     gunreload_frames_raw = load_gif_frames(resource_path("data/gifs/hands/gunreload.gif"))
+    punch_img_raw = Image.open(resource_path("data/gifs/hands/punch.png")).convert("RGBA")
+    left_punch_frames_raw = load_gif_frames(resource_path("data/gifs/hands/LPunch.gif"))
+    right_punch_frames_raw = load_gif_frames(resource_path("data/gifs/hands/RPunch.gif"))
+    bomb_assets = bomb_logic.load_bomb_assets(resource_path, game_view_w, pil_to_surface)
+    bomb_icon_raw = bomb_assets["bomb_icon_raw"]
+    bombon_frames_raw = bomb_assets["bombon_frames_raw"]
+    boom_frames_raw = bomb_assets["boom_frames_raw"]
+    boom_sound_path = bomb_assets["boom_sound_path"]
+    activator_img_raw = bomb_assets["activator_img_raw"]
+    activatorclick_frames_raw = bomb_assets["activatorclick_frames_raw"]
 
     GUN_SCALE = 0.25
+    PUNCH_SCALE = 0.38
+    PUNCH_WIDTH_MULT = 1.28
+    PUNCH_HEIGHT_MULT = 1.30
 
     hud_raw = Image.open(resource_path("data/hud.png")).convert("RGBA")
     HUD_SCALE_X = 3.8
@@ -193,13 +289,34 @@ def start_tutor_maze(root=None):
         "violet": Image.open(resource_path("data/orbs/orb_violet.png")).convert("RGBA"),
     }
 
+    deja_vu_ghost_frames = []
+    for alpha in (255, 210, 165, 120, 80, 45):
+        ghost_frame = Image.new("RGBA", (24, 24), (0, 0, 0, 0))
+        ghost_draw = ImageDraw.Draw(ghost_frame)
+        ghost_draw.ellipse((2, 2, 22, 22), fill=(120, 255, 240, max(10, alpha // 5)))
+        ghost_draw.ellipse((6, 6, 18, 18), fill=(170, 255, 250, max(20, alpha // 2)))
+        ghost_draw.ellipse((9, 9, 15, 15), fill=(240, 255, 255, alpha))
+        deja_vu_ghost_frames.append(ghost_frame)
+
     gunitem_raw = Image.open(resource_path("data/gunitem.png")).convert("RGBA")
     gunitem_raw = gunitem_raw.resize((40, 40), Image.NEAREST)
     gunitem_img = pil_to_surface(gunitem_raw)
+    bombitem_img = bomb_assets["bombitem_img"]
+    activatoritem_img = bomb_assets["activatoritem_img"]
 
     gun_pickup_img_src = Image.open(resource_path("data/unknown.png")).convert("RGBA")
     gun_pickup_frames = [gun_pickup_img_src]
     gun_pickup_scale = (int(game_view_w * 0.1)) / max(gun_pickup_img_src.width, 1)
+    bomb_pickup_frames = bomb_assets["bomb_pickup_frames"]
+    bomb_pickup_scale = bomb_assets["bomb_pickup_scale"]
+    target_marker_frames = bomb_assets["target_marker_frames"]
+
+    hexagaze_assets = hexagaze_logic.load_hexagaze_assets(resource_path)
+    hexagaze_frames = hexagaze_assets["frames"]
+    hexagaze_roll_animations = hexagaze_assets["roll_animations"]
+    hexagaze_roll_durations = hexagaze_assets["roll_durations"]
+    sentry_danger_frames = hexagaze_assets["danger_frames"]
+    sentry_safe_frames = hexagaze_assets["safe_frames"]
 
     enemy_gifs = {
         "sitting": load_gif_frames(resource_path("data/gifs/cicada/cicadasitting.gif")),
@@ -207,10 +324,8 @@ def start_tutor_maze(root=None):
         "walking": load_gif_frames(resource_path("data/gifs/cicada/cicadawalking.gif")),
     }
 
-    mannequin_frames = []
-    for frame_idx in range(1, 10):
-        frame_path = resource_path(f"data/gifs/mannequin/mannequin{frame_idx}.png")
-        mannequin_frames.append(Image.open(frame_path).convert("RGBA"))
+    mannequin_assets = mannequin_logic.load_mannequin_assets(resource_path, get_wav_duration)
+    mannequin_frames = mannequin_assets["frames"]
     mannequin_frame_index = 0
     mannequin_anim_acc = 0.0
     mannequin_x = None
@@ -237,18 +352,12 @@ def start_tutor_maze(root=None):
     texture_column_cache = {}
     ray_engine = RaycastEngine(game_surface, game_view_w, game_view_h, wall_tex, TEX_SIZE)
 
-    for y, row in enumerate(MAP):
-        for x, c in enumerate(row):
-            if c == "M":
-                mannequin_x = x + 0.5
-                mannequin_y = y + 0.5
-                break
-        if mannequin_x is not None:
-            break
-    if mannequin_x is not None and mannequin_y is not None:
-        mannequin_search_visited.add((int(mannequin_x), int(mannequin_y)))
-    mannequin_attack_sound_path = resource_path("data/gifs/mannequin/attackmannequin.wav")
-    mannequin_attack_duration = get_wav_duration(mannequin_attack_sound_path, fallback=1.0)
+    mannequin_state = mannequin_logic.create_mannequin_state(MAP)
+    mannequin_x = mannequin_state["x"]
+    mannequin_y = mannequin_state["y"]
+    mannequin_search_visited = set(mannequin_state["search_visited"])
+    mannequin_attack_sound_path = mannequin_assets["attack_sound_path"]
+    mannequin_attack_duration = mannequin_assets["attack_duration"]
     mannequin_restart_at = None
 
     lift_cells = []
@@ -264,6 +373,32 @@ def start_tutor_maze(root=None):
         for x, c in enumerate(row):
             if c == "G":
                 gun_pickups.append((x + 0.5, y + 0.5))
+
+    bomb_pickups = bomb_logic.collect_bomb_pickups(MAP)
+
+    orb_cycle = ["red", "violet", "yellow", "green"]
+    sentries = hexagaze_logic.collect_sentries(MAP, HEXAGAZE_RADIUS_MIN, HEXAGAZE_RADIUS_MAX, orb_cycle)
+    sentry_projectiles = []
+    hexagaze_config = {
+        "radius_cells": HEXAGAZE_RADIUS_CELLS,
+        "close_sight_radius": HEXAGAZE_CLOSE_SIGHT_RADIUS,
+        "roll_durations": hexagaze_roll_durations,
+        "roll_duration": HEXAGAZE_ROLL_DURATION,
+        "burst_size": HEXAGAZE_BURST_SIZE,
+        "first_shot_delay": HEXAGAZE_FIRST_SHOT_DELAY,
+        "burst_delay": HEXAGAZE_BURST_DELAY,
+        "post_attack_wait": HEXAGAZE_POST_ATTACK_WAIT,
+        "projectile_speed": HEXAGAZE_PROJECTILE_SPEED,
+        "player_hit_radius": HEXAGAZE_PLAYER_HIT_RADIUS,
+        "projectile_damage": HEXAGAZE_PROJECTILE_DAMAGE,
+        "entry_burst_count": HEXAGAZE_ENTRY_BURST_COUNT,
+        "entry_burst_speed": HEXAGAZE_ENTRY_BURST_SPEED,
+        "homing_turn_rate": HEXAGAZE_HOMING_TURN_RATE,
+        "snake_turn_rate": HEXAGAZE_SNAKE_TURN_RATE,
+        "snake_wave_speed": HEXAGAZE_SNAKE_WAVE_SPEED,
+        "snake_wave_amplitude": HEXAGAZE_SNAKE_WAVE_AMPLITUDE,
+        "orb_cycle": orb_cycle,
+    }
 
     lights = []
     for y, row in enumerate(MAP):
@@ -285,10 +420,15 @@ def start_tutor_maze(root=None):
 
     keys = {"w": False, "s": False, "a": False, "d": False}
     selected_slot = 1
+    player_health = PLAYER_MAX_HEALTH
+    player_restart_at = None
     ammo = 17
     max_ammo = 17
     reloading = False
     has_gun = False
+    slot2_item = None
+    placed_bombs = []
+    active_explosions = []
     bob_phase = 0.0
     bob_offset = 0.0
     flash_timer = 0.0
@@ -307,8 +447,22 @@ def start_tutor_maze(root=None):
     gunshoot_frame_index = 0
     reload_anim_index = 0
     reload_anim_active = False
+    activator_click_animating = False
+    activator_click_frame_index = 0
+    activator_click_acc = 0.0
+    bomb_world_frame_index = 0
+    bomb_world_anim_acc = 0.0
+    hand_target_item_id = None
+    hand_previous_item_id = None
+    hand_swap_progress = 1.0
+    hand_swap_active = False
     shoot_acc = 0.0
     reload_acc = 0.0
+    punch_animating = False
+    punch_frame_index = 0
+    punch_acc = 0.0
+    punch_side = "left"
+    next_punch_time = 0.0
     def _clamp01(v: float) -> float:
         return max(0.0, min(1.0, v))
 
@@ -402,11 +556,315 @@ def start_tutor_maze(root=None):
 
     running = True
 
-    def build_gun_surface_from_pil(pil_frame):
+    def build_hand_surface_from_pil(pil_frame, item_id=None):
         w, h = pil_frame.size
-        new_w = int(game_view_w * GUN_SCALE)
+        hand_scale = PUNCH_SCALE if item_id == "fists" else GUN_SCALE
+        new_w = int(game_view_w * hand_scale)
         new_h = int(h * (new_w / w))
+        if item_id == "fists":
+            new_w = int(new_w * PUNCH_WIDTH_MULT)
+            new_h = int(new_h * PUNCH_HEIGHT_MULT)
         return pil_to_surface(pil_frame.resize((new_w, new_h), Image.NEAREST))
+
+    def get_hand_pil_for_item(item_id):
+        if item_id == "gun":
+            if reloading and reload_anim_active:
+                return gunreload_frames_raw[min(reload_anim_index, len(gunreload_frames_raw) - 1)]
+            if gunshoot_animating:
+                return gunshoot_frames_raw[min(gunshoot_frame_index, len(gunshoot_frames_raw) - 1)]
+            return gun_img_raw
+        if item_id == "fists":
+            if punch_animating:
+                frames = right_punch_frames_raw if punch_side == "right" else left_punch_frames_raw
+                return frames[min(punch_frame_index, len(frames) - 1)]
+            return punch_img_raw
+        if item_id in {"bomb", "activator"}:
+            return bomb_logic.get_hand_pil(item_id, bomb_assets, activator_click_animating, activator_click_frame_index)
+        return None
+
+    def get_selected_inventory_item_id():
+        if selected_slot == 1 and has_gun:
+            return "gun"
+        if selected_slot == 2 and slot2_item == "bomb":
+            return "bomb"
+        if selected_slot == 2 and slot2_item == "activator":
+            return "activator"
+        return None
+
+    def get_current_hand_item_id():
+        if elevator_active or start_cutscene_active:
+            return None
+        return get_selected_inventory_item_id() or "fists"
+
+    def update_hand_swap(delta_time):
+        nonlocal hand_target_item_id, hand_previous_item_id, hand_swap_progress, hand_swap_active
+        target_item_id = get_current_hand_item_id()
+        if target_item_id != hand_target_item_id:
+            hand_previous_item_id = hand_target_item_id
+            hand_target_item_id = target_item_id
+            if hand_previous_item_id != hand_target_item_id:
+                hand_swap_progress = 0.0
+                hand_swap_active = True
+        if hand_swap_active:
+            hand_swap_progress += delta_time / max(0.001, HAND_SWAP_DURATION)
+            if hand_swap_progress >= 1.0:
+                hand_swap_progress = 1.0
+                hand_swap_active = False
+                hand_previous_item_id = None
+
+    def get_targeted_floor_cell(max_distance=3.2, step=0.03):
+        return bomb_logic.get_targeted_floor_cell(
+            player_x,
+            player_y,
+            player_angle,
+            is_wall,
+            placed_bombs,
+            max_distance=max_distance,
+            step=step,
+        )
+
+    def place_bomb():
+        nonlocal slot2_item
+        slot2_item, _ = bomb_logic.place_bomb(
+            selected_slot,
+            slot2_item,
+            placed_bombs,
+            player_x,
+            player_y,
+            player_angle,
+            is_wall,
+        )
+
+    def spawn_bomb_explosion(cell):
+        bomb_logic.spawn_bomb_explosion(active_explosions, boom_sound_path, cell)
+
+    def damage_player(amount, now_value):
+        nonlocal player_health
+        if player_restart_at is not None:
+            return
+        player_health = max(0, player_health - amount)
+        if player_health <= 0:
+            trigger_player_death(now_value)
+
+    def sync_mannequin_state_to_module():
+        mannequin_state["x"] = mannequin_x
+        mannequin_state["y"] = mannequin_y
+        mannequin_state["health"] = mannequin_health
+        mannequin_state["max_health"] = mannequin_max_health
+        mannequin_state["alive"] = mannequin_alive
+        mannequin_state["mode"] = mannequin_mode
+        mannequin_state["next_search_move_at"] = mannequin_next_search_move_at
+        mannequin_state["search_visited"] = set(mannequin_search_visited)
+        mannequin_state["observe_distance"] = mannequin_observe_distance
+        mannequin_state["hidden_active"] = mannequin_hidden_active
+        mannequin_state["next_hidden_step_at"] = mannequin_next_hidden_step_at
+        mannequin_state["notice_radius"] = mannequin_notice_radius
+        mannequin_state["shot_push_cooldown"] = mannequin_shot_push_cooldown
+        mannequin_state["last_seen_by_player"] = mannequin_last_seen_by_player
+        mannequin_state["restart_at"] = mannequin_restart_at
+
+    def sync_mannequin_state_from_module():
+        nonlocal mannequin_x, mannequin_y, mannequin_health, mannequin_max_health, mannequin_alive, mannequin_mode
+        nonlocal mannequin_next_search_move_at, mannequin_search_visited, mannequin_observe_distance
+        nonlocal mannequin_hidden_active, mannequin_next_hidden_step_at, mannequin_notice_radius
+        nonlocal mannequin_shot_push_cooldown, mannequin_last_seen_by_player, mannequin_restart_at
+        mannequin_x = mannequin_state["x"]
+        mannequin_y = mannequin_state["y"]
+        mannequin_health = mannequin_state["health"]
+        mannequin_max_health = mannequin_state["max_health"]
+        mannequin_alive = mannequin_state["alive"]
+        mannequin_mode = mannequin_state["mode"]
+        mannequin_next_search_move_at = mannequin_state["next_search_move_at"]
+        mannequin_search_visited = set(mannequin_state["search_visited"])
+        mannequin_observe_distance = mannequin_state["observe_distance"]
+        mannequin_hidden_active = mannequin_state["hidden_active"]
+        mannequin_next_hidden_step_at = mannequin_state["next_hidden_step_at"]
+        mannequin_notice_radius = mannequin_state["notice_radius"]
+        mannequin_shot_push_cooldown = mannequin_state["shot_push_cooldown"]
+        mannequin_last_seen_by_player = mannequin_state["last_seen_by_player"]
+        mannequin_restart_at = mannequin_state["restart_at"]
+
+    def damage_mannequin(amount):
+        nonlocal enemies_killed
+        sync_mannequin_state_to_module()
+        killed = mannequin_logic.damage(mannequin_state, amount)
+        sync_mannequin_state_from_module()
+        if killed:
+            enemies_killed += 1
+
+    def damage_mannequin_from_player_attack(amount, register_shot_hit=False):
+        nonlocal total_shots_hit, enemies_killed
+        nonlocal mannequin_health, mannequin_alive, mannequin_hidden_active
+        nonlocal mannequin_next_hidden_step_at, mannequin_last_seen_by_player, mannequin_shot_push_cooldown
+        if not mannequin_alive:
+            return False
+        mannequin_health = max(0, mannequin_health - amount)
+        if register_shot_hit:
+            total_shots_hit += 1
+        mannequin_hidden_active = False
+        mannequin_next_hidden_step_at = None
+        mannequin_last_seen_by_player = True
+        if mannequin_health <= 0:
+            mannequin_alive = False
+            enemies_killed += 1
+        elif mannequin_shot_push_cooldown <= 0.0:
+            push_mannequin_back()
+            mannequin_shot_push_cooldown = 0.12
+        return True
+
+    def try_damage_target_under_cursor(amount, max_distance_cells):
+        nonlocal enemies_killed
+        best_target = None
+        best_dist = float("inf")
+
+        if mannequin_alive and mannequin_x is not None and mannequin_y is not None:
+            dx = mannequin_x - player_x
+            dy = mannequin_y - player_y
+            dist = math.hypot(dx, dy)
+            angle_diff = wrap_angle(math.atan2(dy, dx) - player_angle)
+            if (
+                dist <= max_distance_cells
+                and abs(angle_diff) <= PUNCH_AIM_TOLERANCE
+                and has_line_of_sight(player_x, player_y, mannequin_x, mannequin_y)
+            ):
+                best_target = ("mannequin", None)
+                best_dist = dist
+
+        for orb_index, orb in enumerate(orbs):
+            if orb["health"] <= 0:
+                continue
+            dx = orb["x"] - player_x
+            dy = orb["y"] - player_y
+            dist = math.hypot(dx, dy)
+            angle_diff = wrap_angle(math.atan2(dy, dx) - player_angle)
+            if (
+                dist <= max_distance_cells
+                and abs(angle_diff) <= PUNCH_AIM_TOLERANCE
+                and has_line_of_sight(player_x, player_y, orb["x"], orb["y"])
+                and dist < best_dist
+            ):
+                best_target = ("orb", orb_index)
+                best_dist = dist
+
+        for sentry_index, sentry in enumerate(sentries):
+            if sentry["health"] <= 0:
+                continue
+            dx = sentry["x"] - player_x
+            dy = sentry["y"] - player_y
+            dist = math.hypot(dx, dy)
+            angle_diff = wrap_angle(math.atan2(dy, dx) - player_angle)
+            if (
+                dist <= max_distance_cells
+                and abs(angle_diff) <= PUNCH_AIM_TOLERANCE
+                and has_line_of_sight(player_x, player_y, sentry["x"], sentry["y"])
+                and dist < best_dist
+            ):
+                best_target = ("sentry", sentry_index)
+                best_dist = dist
+
+        if best_target is None:
+            return False
+
+        target_kind, target_index = best_target
+        if target_kind == "mannequin":
+            damage_mannequin_from_player_attack(amount)
+            return True
+        if target_kind == "orb":
+            orb = orbs[target_index]
+            previous_health = orb["health"]
+            orb["health"] = max(0, orb["health"] - amount)
+            if previous_health > 0 and orb["health"] <= 0:
+                enemies_killed += 1
+            return True
+
+        sentry = sentries[target_index]
+        previous_health = sentry["health"]
+        sentry["health"] = max(0, sentry["health"] - amount)
+        if previous_health > 0 and sentry["health"] <= 0:
+            sentry["burst_shots_left"] = 0
+            enemies_killed += 1
+        return True
+
+    def damage_entities_in_bomb_area(center_cell, radius_cells, now_value):
+        nonlocal enemies_killed
+        min_x = center_cell[0] - radius_cells
+        max_x = center_cell[0] + radius_cells
+        min_y = center_cell[1] - radius_cells
+        max_y = center_cell[1] + radius_cells
+
+        player_cell = (int(player_x), int(player_y))
+        if min_x <= player_cell[0] <= max_x and min_y <= player_cell[1] <= max_y:
+            damage_player(5, now_value)
+
+        mannequin_cell = (int(mannequin_x), int(mannequin_y)) if mannequin_x is not None and mannequin_y is not None else None
+        if mannequin_cell is not None and min_x <= mannequin_cell[0] <= max_x and min_y <= mannequin_cell[1] <= max_y:
+            damage_mannequin(5)
+
+        for orb in orbs:
+            if orb["health"] <= 0:
+                continue
+            orb_cell = (int(orb["x"]), int(orb["y"]))
+            if min_x <= orb_cell[0] <= max_x and min_y <= orb_cell[1] <= max_y:
+                orb["health"] = max(0, orb["health"] - 5)
+                if orb["health"] <= 0:
+                    enemies_killed += 1
+
+        for sentry in sentries:
+            if sentry["health"] <= 0:
+                continue
+            sentry_cell = (int(sentry["x"]), int(sentry["y"]))
+            if min_x <= sentry_cell[0] <= max_x and min_y <= sentry_cell[1] <= max_y:
+                sentry["health"] = max(0, sentry["health"] - 5)
+                if sentry["health"] <= 0:
+                    sentry["burst_shots_left"] = 0
+                    enemies_killed += 1
+
+    def detonate_bomb_at_cell(cell, radius_cells, now_value):
+        return bomb_logic.detonate_bomb_at_cell(
+            placed_bombs,
+            active_explosions,
+            boom_sound_path,
+            cell,
+            radius_cells,
+            now_value,
+            damage_entities_in_bomb_area,
+        )
+
+    def update_bomb_system(delta_time, now_value):
+        nonlocal bomb_world_anim_acc, bomb_world_frame_index
+        nonlocal activator_click_animating, activator_click_frame_index, activator_click_acc
+        mannequin_cell = (int(mannequin_x), int(mannequin_y)) if mannequin_x is not None and mannequin_y is not None else None
+        bomb_update = bomb_logic.update_bomb_system(
+            placed_bombs,
+            active_explosions,
+            bomb_assets,
+            delta_time,
+            now_value,
+            (int(player_x), int(player_y)),
+            mannequin_cell,
+            mannequin_alive,
+            damage_entities_in_bomb_area,
+            bomb_world_frame_index,
+            bomb_world_anim_acc,
+            activator_click_animating,
+            activator_click_frame_index,
+            activator_click_acc,
+        )
+        bomb_world_frame_index = bomb_update["bomb_world_frame_index"]
+        bomb_world_anim_acc = bomb_update["bomb_world_anim_acc"]
+        activator_click_animating = bomb_update["activator_click_animating"]
+        activator_click_frame_index = bomb_update["activator_click_frame_index"]
+        activator_click_acc = bomb_update["activator_click_acc"]
+
+    def trigger_activator():
+        nonlocal activator_click_animating, activator_click_frame_index, activator_click_acc
+        activator_click_animating, activator_click_frame_index, activator_click_acc, _ = bomb_logic.trigger_activator(
+            selected_slot,
+            slot2_item,
+            placed_bombs,
+            activator_click_animating,
+            time.time(),
+        )
 
     def shoot_gun():
         nonlocal gunshoot_animating, gunshoot_frame_index, ammo, flash_timer, reloading, shoot_acc
@@ -435,17 +893,7 @@ def start_tutor_maze(root=None):
             angle_to_mannequin = math.atan2(dy, dx)
             angle_diff = wrap_angle(angle_to_mannequin - player_angle)
             if abs(angle_diff) < 0.05 and dist < 8.5 and has_line_of_sight(player_x, player_y, mannequin_x, mannequin_y):
-                mannequin_health -= 1
-                total_shots_hit += 1
-                mannequin_hidden_active = False
-                mannequin_next_hidden_step_at = None
-                mannequin_last_seen_by_player = True
-                if mannequin_health <= 0:
-                    mannequin_alive = False
-                    enemies_killed += 1
-                elif mannequin_shot_push_cooldown <= 0.0:
-                    push_mannequin_back()
-                    mannequin_shot_push_cooldown = 0.12
+                damage_mannequin_from_player_attack(1, register_shot_hit=True)
 
         # Check if cursor hits any orb
         for orb in orbs:
@@ -464,6 +912,23 @@ def start_tutor_maze(root=None):
                     enemies_killed += 1  # Increment kill counter
                     print(f"{orb['color']} orb destroyed! Total kills: {enemies_killed}")  # Debug info
 
+        for sentry in sentries:
+            if sentry["health"] <= 0:
+                continue
+            dx = sentry["x"] - player_x
+            dy = sentry["y"] - player_y
+            dist = math.hypot(dx, dy)
+            angle_to_sentry = math.atan2(dy, dx)
+            angle_diff = wrap_angle(angle_to_sentry - player_angle)
+            if abs(angle_diff) < 0.05 and dist < 10 and has_line_of_sight(player_x, player_y, sentry["x"], sentry["y"]):
+                sentry["health"] -= 1
+                total_shots_hit += 1
+                if sentry["health"] <= 0:
+                    sentry["health"] = 0
+                    sentry["burst_shots_left"] = 0
+                    enemies_killed += 1
+                break
+
     def start_reload():
         nonlocal reloading, reload_anim_active, reload_anim_index, reload_acc, ammo
         if reloading or not has_gun:
@@ -472,6 +937,36 @@ def start_tutor_maze(root=None):
         reload_anim_active = True
         reload_anim_index = 0
         reload_acc = 0.0
+
+    def punch_with_fists(mouse_button):
+        nonlocal punch_animating, punch_frame_index, punch_acc, punch_side, next_punch_time
+        if get_current_hand_item_id() != "fists":
+            return
+        now_value = time.time()
+        if now_value < next_punch_time:
+            return
+        next_punch_time = now_value + PUNCH_COOLDOWN
+        punch_side = "right" if mouse_button == 3 else "left"
+        punch_animating = True
+        punch_frame_index = 0
+        punch_acc = 0.0
+        try_damage_target_under_cursor(PUNCH_DAMAGE, PUNCH_RANGE_CELLS)
+
+    def use_selected_item(mouse_button):
+        selected_item_id = get_selected_inventory_item_id()
+        if selected_item_id is None:
+            if mouse_button in (1, 3):
+                punch_with_fists(mouse_button)
+            return
+        if mouse_button != 1:
+            return
+        if selected_slot == 1:
+            shoot_gun()
+        elif selected_slot == 2:
+            if slot2_item == "bomb":
+                place_bomb()
+            elif slot2_item == "activator":
+                trigger_activator()
 
     # Fonts dictionary for statistics window
     fonts = {
@@ -490,6 +985,242 @@ def start_tutor_maze(root=None):
     statistics_window = StatisticsWindow(W, H, 0, stats, fonts, resource_path)
     next_action = None
 
+    deja_vu_active = False
+    deja_vu_started_at = 0.0
+    deja_vu_charge = DEJA_VU_MAX_CHARGE
+    deja_vu_recharge_available_at = 0.0
+    deja_vu_snapshot = None
+    deja_vu_ghost_trail = []
+    deja_vu_ghost_acc = 0.0
+    deja_vu_return_started_at = None
+    deja_vu_active_budget = 0.0
+
+    def deja_vu_available():
+        return (
+            not deja_vu_active
+            and not intro_active
+            and not elevator_active
+            and not stats_window_active
+            and not start_cutscene_active
+            and mannequin_restart_at is None
+            and deja_vu_charge >= DEJA_VU_MIN_ACTIVATION
+        )
+
+    def capture_deja_vu_snapshot():
+        return {
+            "player_x": player_x,
+            "player_y": player_y,
+            "player_z": player_z,
+            "player_angle": player_angle,
+            "player_health": player_health,
+            "player_restart_at": player_restart_at,
+            "selected_slot": selected_slot,
+            "ammo": ammo,
+            "max_ammo": max_ammo,
+            "reloading": reloading,
+            "has_gun": has_gun,
+            "slot2_item": slot2_item,
+            "bob_phase": bob_phase,
+            "bob_offset": bob_offset,
+            "flash_timer": flash_timer,
+            "gunshoot_animating": gunshoot_animating,
+            "gunshoot_frame_index": gunshoot_frame_index,
+            "reload_anim_index": reload_anim_index,
+            "reload_anim_active": reload_anim_active,
+            "activator_click_animating": activator_click_animating,
+            "activator_click_frame_index": activator_click_frame_index,
+            "activator_click_acc": activator_click_acc,
+            "bomb_world_frame_index": bomb_world_frame_index,
+            "bomb_world_anim_acc": bomb_world_anim_acc,
+            "hand_target_item_id": hand_target_item_id,
+            "hand_previous_item_id": hand_previous_item_id,
+            "hand_swap_progress": hand_swap_progress,
+            "hand_swap_active": hand_swap_active,
+            "shoot_acc": shoot_acc,
+            "reload_acc": reload_acc,
+            "punch_animating": punch_animating,
+            "punch_frame_index": punch_frame_index,
+            "punch_acc": punch_acc,
+            "punch_side": punch_side,
+            "next_punch_time": next_punch_time,
+            "total_shots_fired": total_shots_fired,
+            "total_shots_hit": total_shots_hit,
+            "enemies_killed": enemies_killed,
+            "gun_pickups": list(gun_pickups),
+            "bomb_pickups": list(bomb_pickups),
+            "placed_bombs": copy.deepcopy(placed_bombs),
+            "active_explosions": copy.deepcopy(active_explosions),
+            "orbs": copy.deepcopy(orbs),
+            "sentries": copy.deepcopy(sentries),
+            "sentry_projectiles": copy.deepcopy(sentry_projectiles),
+            "light_states": dict(light_states),
+            "light_timers": dict(light_timers),
+            "mannequin_x": mannequin_x,
+            "mannequin_y": mannequin_y,
+            "mannequin_health": mannequin_health,
+            "mannequin_alive": mannequin_alive,
+            "mannequin_mode": mannequin_mode,
+            "mannequin_next_search_move_at": mannequin_next_search_move_at,
+            "mannequin_search_visited": set(mannequin_search_visited),
+            "mannequin_observe_distance": mannequin_observe_distance,
+            "mannequin_hidden_active": mannequin_hidden_active,
+            "mannequin_next_hidden_step_at": mannequin_next_hidden_step_at,
+            "mannequin_shot_push_cooldown": mannequin_shot_push_cooldown,
+            "mannequin_last_seen_by_player": mannequin_last_seen_by_player,
+            "mannequin_restart_at": mannequin_restart_at,
+        }
+
+    def restore_deja_vu_snapshot(snapshot):
+        nonlocal player_x, player_y, player_z, player_angle, player_health, player_restart_at
+        nonlocal selected_slot, ammo, max_ammo, reloading, has_gun, slot2_item
+        nonlocal bob_phase, bob_offset, flash_timer
+        nonlocal gunshoot_animating, gunshoot_frame_index, reload_anim_index, reload_anim_active
+        nonlocal activator_click_animating, activator_click_frame_index, activator_click_acc
+        nonlocal bomb_world_frame_index, bomb_world_anim_acc
+        nonlocal hand_target_item_id, hand_previous_item_id, hand_swap_progress, hand_swap_active
+        nonlocal shoot_acc, reload_acc, punch_animating, punch_frame_index, punch_acc, punch_side, next_punch_time
+        nonlocal total_shots_fired, total_shots_hit, enemies_killed
+        nonlocal gun_pickups, bomb_pickups, placed_bombs, active_explosions, orbs, sentries, sentry_projectiles, light_states, light_timers
+        nonlocal mannequin_x, mannequin_y, mannequin_health, mannequin_alive, mannequin_mode
+        nonlocal mannequin_next_search_move_at, mannequin_search_visited, mannequin_observe_distance
+        nonlocal mannequin_hidden_active, mannequin_next_hidden_step_at
+        nonlocal mannequin_shot_push_cooldown, mannequin_last_seen_by_player, mannequin_restart_at
+
+        player_x = snapshot["player_x"]
+        player_y = snapshot["player_y"]
+        player_z = snapshot["player_z"]
+        player_angle = snapshot["player_angle"]
+        player_health = snapshot["player_health"]
+        player_restart_at = snapshot["player_restart_at"]
+        selected_slot = snapshot["selected_slot"]
+        ammo = snapshot["ammo"]
+        max_ammo = snapshot["max_ammo"]
+        reloading = snapshot["reloading"]
+        has_gun = snapshot["has_gun"]
+        slot2_item = snapshot["slot2_item"]
+        bob_phase = snapshot["bob_phase"]
+        bob_offset = snapshot["bob_offset"]
+        flash_timer = snapshot["flash_timer"]
+        gunshoot_animating = snapshot["gunshoot_animating"]
+        gunshoot_frame_index = snapshot["gunshoot_frame_index"]
+        reload_anim_index = snapshot["reload_anim_index"]
+        reload_anim_active = snapshot["reload_anim_active"]
+        activator_click_animating = snapshot["activator_click_animating"]
+        activator_click_frame_index = snapshot["activator_click_frame_index"]
+        activator_click_acc = snapshot["activator_click_acc"]
+        bomb_world_frame_index = snapshot["bomb_world_frame_index"]
+        bomb_world_anim_acc = snapshot["bomb_world_anim_acc"]
+        hand_target_item_id = snapshot["hand_target_item_id"]
+        hand_previous_item_id = snapshot["hand_previous_item_id"]
+        hand_swap_progress = snapshot["hand_swap_progress"]
+        hand_swap_active = snapshot["hand_swap_active"]
+        shoot_acc = snapshot["shoot_acc"]
+        reload_acc = snapshot["reload_acc"]
+        punch_animating = snapshot["punch_animating"]
+        punch_frame_index = snapshot["punch_frame_index"]
+        punch_acc = snapshot["punch_acc"]
+        punch_side = snapshot["punch_side"]
+        next_punch_time = snapshot["next_punch_time"]
+        total_shots_fired = snapshot["total_shots_fired"]
+        total_shots_hit = snapshot["total_shots_hit"]
+        enemies_killed = snapshot["enemies_killed"]
+        gun_pickups = list(snapshot["gun_pickups"])
+        bomb_pickups = list(snapshot["bomb_pickups"])
+        placed_bombs = copy.deepcopy(snapshot["placed_bombs"])
+        active_explosions = copy.deepcopy(snapshot["active_explosions"])
+        orbs = copy.deepcopy(snapshot["orbs"])
+        sentries = copy.deepcopy(snapshot["sentries"])
+        sentry_projectiles = copy.deepcopy(snapshot["sentry_projectiles"])
+        light_states = dict(snapshot["light_states"])
+        light_timers = dict(snapshot["light_timers"])
+        mannequin_x = snapshot["mannequin_x"]
+        mannequin_y = snapshot["mannequin_y"]
+        mannequin_health = snapshot["mannequin_health"]
+        mannequin_alive = snapshot["mannequin_alive"]
+        mannequin_mode = snapshot["mannequin_mode"]
+        mannequin_next_search_move_at = snapshot["mannequin_next_search_move_at"]
+        mannequin_search_visited = set(snapshot["mannequin_search_visited"])
+        mannequin_observe_distance = snapshot["mannequin_observe_distance"]
+        mannequin_hidden_active = snapshot["mannequin_hidden_active"]
+        mannequin_next_hidden_step_at = snapshot["mannequin_next_hidden_step_at"]
+        mannequin_shot_push_cooldown = snapshot["mannequin_shot_push_cooldown"]
+        mannequin_last_seen_by_player = snapshot["mannequin_last_seen_by_player"]
+        mannequin_restart_at = snapshot["mannequin_restart_at"]
+
+    def activate_deja_vu():
+        nonlocal deja_vu_active, deja_vu_started_at, deja_vu_snapshot, deja_vu_active_budget
+        nonlocal deja_vu_ghost_trail, deja_vu_ghost_acc, deja_vu_return_started_at
+        if not deja_vu_available():
+            return
+        now_local = time.time()
+        deja_vu_snapshot = capture_deja_vu_snapshot()
+        deja_vu_active = True
+        deja_vu_started_at = now_local
+        deja_vu_active_budget = deja_vu_charge
+        deja_vu_ghost_trail = [{"x": player_x, "y": player_y, "spawned_at": now_local}]
+        deja_vu_ghost_acc = 0.0
+        deja_vu_return_started_at = None
+
+    def finish_deja_vu():
+        nonlocal deja_vu_active, deja_vu_snapshot, deja_vu_ghost_acc, deja_vu_return_started_at
+        nonlocal deja_vu_active_budget, deja_vu_charge, deja_vu_recharge_available_at
+        if deja_vu_snapshot is None:
+            deja_vu_active = False
+            return
+        elapsed = max(0.0, time.time() - deja_vu_started_at)
+        deja_vu_charge = max(0.0, min(DEJA_VU_MAX_CHARGE, deja_vu_active_budget - elapsed))
+        deja_vu_recharge_available_at = time.time() + DEJA_VU_RECHARGE_DELAY
+        restore_deja_vu_snapshot(deja_vu_snapshot)
+        deja_vu_active = False
+        deja_vu_snapshot = None
+        deja_vu_ghost_acc = 0.0
+        deja_vu_active_budget = 0.0
+        deja_vu_return_started_at = time.time()
+
+    def update_deja_vu(delta_time):
+        nonlocal deja_vu_ghost_acc, deja_vu_ghost_trail, deja_vu_charge
+        now_local = time.time()
+        deja_vu_ghost_trail = [
+            point for point in deja_vu_ghost_trail
+            if now_local - point["spawned_at"] < DEJA_VU_GHOST_LIFETIME
+        ]
+        if not deja_vu_active and now_local >= deja_vu_recharge_available_at and deja_vu_charge < DEJA_VU_MAX_CHARGE:
+            fast_rate = DEJA_VU_FAST_CHARGE_CAP / DEJA_VU_FAST_CHARGE_TIME
+            slow_charge_amount = max(0.0, DEJA_VU_MAX_CHARGE - DEJA_VU_FAST_CHARGE_CAP)
+            slow_rate = slow_charge_amount / DEJA_VU_SLOW_CHARGE_TIME if slow_charge_amount > 0 else fast_rate
+            recharge_left = max(0.0, delta_time)
+
+            if deja_vu_charge < DEJA_VU_FAST_CHARGE_CAP and recharge_left > 0.0:
+                fast_missing = DEJA_VU_FAST_CHARGE_CAP - deja_vu_charge
+                fast_gain = min(fast_missing, recharge_left * fast_rate)
+                deja_vu_charge += fast_gain
+                recharge_left -= fast_gain / fast_rate
+
+            if deja_vu_charge >= DEJA_VU_FAST_CHARGE_CAP and recharge_left > 0.0:
+                deja_vu_charge = min(DEJA_VU_MAX_CHARGE, deja_vu_charge + recharge_left * slow_rate)
+        if not deja_vu_active:
+            return
+        deja_vu_ghost_acc += delta_time
+        if deja_vu_ghost_acc >= DEJA_VU_GHOST_INTERVAL:
+            deja_vu_ghost_acc = 0.0
+            if (
+                not deja_vu_ghost_trail
+                or math.hypot(player_x - deja_vu_ghost_trail[-1]["x"], player_y - deja_vu_ghost_trail[-1]["y"]) > 0.08
+            ):
+                deja_vu_ghost_trail.append({"x": player_x, "y": player_y, "spawned_at": now_local})
+        if now_local - deja_vu_started_at >= deja_vu_active_budget:
+            finish_deja_vu()
+
+    def get_deja_vu_visual_mix(now_value):
+        if deja_vu_active:
+            return _clamp01((now_value - deja_vu_started_at) / DEJA_VU_ENTER_FADE)
+        if deja_vu_return_started_at is not None:
+            return 1.0 - _clamp01((now_value - deja_vu_return_started_at) / DEJA_VU_RETURN_FADE)
+        return 0.0
+
+    def get_deja_vu_speed_multiplier(now_value):
+        return 1.0 + (DEJA_VU_SPEED_BOOST - 1.0) * get_deja_vu_visual_mix(now_value)
+
     def has_line_of_sight(x1, y1, x2, y2, step=0.1):
         dx = x2 - x1
         dy = y2 - y1
@@ -503,6 +1234,121 @@ def start_tutor_maze(root=None):
             if is_wall(px, py):
                 return False
         return True
+
+    def restart_pending():
+        return mannequin_restart_at is not None or player_restart_at is not None
+
+    def trigger_player_death(now_value):
+        nonlocal player_restart_at
+        if player_restart_at is None:
+            player_restart_at = now_value + 0.35
+
+    def build_sentry_visible_cells(sentry):
+        hexagaze_logic.build_visible_cells(sentry, MAP, has_line_of_sight)
+
+    def is_blocked_by_sentry(x_pos, y_pos):
+        return hexagaze_logic.is_blocked_by_sentry(sentries, x_pos, y_pos, HEXAGAZE_BLOCK_RADIUS)
+
+    def player_in_sentry_sight(sentry):
+        if sentry["health"] <= 0:
+            return False
+        if math.hypot(player_x - sentry["x"], player_y - sentry["y"]) <= HEXAGAZE_CLOSE_SIGHT_RADIUS:
+            return has_line_of_sight(sentry["x"], sentry["y"], player_x, player_y)
+        player_cell = (int(player_x), int(player_y))
+        return player_cell in sentry["visible_cells"] and has_line_of_sight(sentry["x"], sentry["y"], player_x, player_y)
+
+    def player_in_sentry_radius(sentry):
+        if sentry["health"] <= 0:
+            return False
+        radius = float(sentry.get("vision_radius", HEXAGAZE_RADIUS_CELLS))
+        return math.hypot(player_x - sentry["x"], player_y - sentry["y"]) <= radius + 0.01
+
+    def queue_next_hexagaze_roll(sentry, now_local):
+        roll_name = random.choice(("roll1", "roll2", "roll4"))
+        roll_duration = hexagaze_roll_durations.get(roll_name, HEXAGAZE_ROLL_DURATION)
+        sentry["queued_roll"] = roll_name
+        sentry["roll_started_at"] = now_local
+        sentry["roll_visible_until"] = now_local + roll_duration
+        if roll_name == "roll1":
+            sentry["queued_attack_kind"] = "homing"
+            sentry["queued_attack_shots"] = 1
+        elif roll_name == "roll2":
+            sentry["queued_attack_kind"] = "snake"
+            sentry["queued_attack_shots"] = 2
+        else:
+            sentry["queued_attack_kind"] = "normal"
+            sentry["queued_attack_shots"] = 4
+        sentry["cooldown_until"] = now_local + roll_duration
+
+    def start_sentry_burst(sentry, now_local):
+        sentry["burst_shots_left"] = max(1, int(sentry.get("queued_attack_shots", HEXAGAZE_BURST_SIZE)))
+        sentry["burst_shots_fired"] = 0
+        sentry["next_shot_at"] = now_local + HEXAGAZE_FIRST_SHOT_DELAY
+        sentry["queued_roll"] = None
+        sentry["roll_visible_until"] = 0.0
+        sentry["attack_cycle_id"] += 1
+        sentry["current_cycle_id"] = sentry["attack_cycle_id"]
+
+    def spawn_sentry_projectile(sentry, attack_kind=None, base_angle=None, speed_override=None):
+        color = orb_cycle[sentry["orb_cycle_index"] % len(orb_cycle)]
+        sentry["orb_cycle_index"] += 1
+        angle = base_angle if base_angle is not None else math.atan2(player_y - sentry["y"], player_x - sentry["x"])
+        sentry["facing_angle"] = angle
+        attack_kind = attack_kind or sentry.get("queued_attack_kind", "normal")
+        shot_index = sentry.get("burst_shots_fired", 0)
+        wave_direction = 0
+        wave_phase = 0.0
+        if attack_kind == "snake":
+            wave_direction = -1 if shot_index % 2 == 0 else 1
+            wave_phase = shot_index * math.pi
+        projectile_speed = speed_override if speed_override is not None else HEXAGAZE_PROJECTILE_SPEED
+        sentry_projectiles.append(
+            {
+                "x": sentry["x"] + math.cos(angle) * 0.38,
+                "y": sentry["y"] + math.sin(angle) * 0.38,
+                "vx": math.cos(angle) * projectile_speed,
+                "vy": math.sin(angle) * projectile_speed,
+                "color": color,
+                "kind": attack_kind,
+                "wave_direction": wave_direction,
+                "wave_phase": wave_phase,
+                "age": 0.0,
+                "owner_cell": (sentry["cell_x"], sentry["cell_y"]),
+                "cycle_id": sentry.get("current_cycle_id", 0),
+            }
+        )
+
+    def launch_hexagaze_entry_burst(sentry, now_local):
+        sentry["queued_roll"] = None
+        sentry["roll_visible_until"] = 0.0
+        sentry["burst_shots_left"] = 0
+        sentry["waiting_for_hit"] = False
+        sentry["waiting_until"] = now_local + HEXAGAZE_POST_ATTACK_WAIT
+        sentry["attack_cycle_id"] += 1
+        sentry["current_cycle_id"] = sentry["attack_cycle_id"]
+        base_angle = math.atan2(player_y - sentry["y"], player_x - sentry["x"])
+        for _ in range(HEXAGAZE_ENTRY_BURST_COUNT):
+            spawn_sentry_projectile(
+                sentry,
+                attack_kind="fast",
+                base_angle=base_angle,
+                speed_override=HEXAGAZE_ENTRY_BURST_SPEED,
+            )
+
+    def update_sentries(delta_time):
+        hexagaze_logic.update_sentries(
+            sentries,
+            sentry_projectiles,
+            delta_time,
+            time.time(),
+            player_x,
+            player_y,
+            is_wall,
+            has_line_of_sight,
+            elevator_active or stats_window_active or intro_active or start_cutscene_active or restart_pending(),
+            damage_player,
+            hexagaze_config,
+        )
 
     def is_walkable_cell(cell_x, cell_y):
         if cell_x < 0 or cell_y < 0:
@@ -564,30 +1410,31 @@ def start_tutor_maze(root=None):
         mannequin_observe_distance = used_radius
         return True
 
-    def get_mannequin_frame_index():
-        if mannequin_x is None or mannequin_y is None:
+    def get_directional_frame_index(target_x, target_y, frames):
+        if target_x is None or target_y is None or not frames:
             return 0
-        viewer_angle = math.atan2(player_y - mannequin_y, player_x - mannequin_x)
-        sector_size = (2 * math.pi) / len(mannequin_frames)
-        sector = int((viewer_angle % (2 * math.pi)) / sector_size) % len(mannequin_frames)
+        viewer_angle = math.atan2(player_y - target_y, player_x - target_x)
+        sector_size = (2 * math.pi) / len(frames)
+        sector = int((viewer_angle % (2 * math.pi)) / sector_size) % len(frames)
         return sector
 
+    def get_mannequin_frame_index():
+        sync_mannequin_state_to_module()
+        return mannequin_logic.get_frame_index(mannequin_state, player_x, player_y, len(mannequin_frames))
+
+    def get_hexagaze_frame_index(hexagaze):
+        return hexagaze_logic.get_frame_index(hexagaze, player_x, player_y, len(hexagaze_frames))
+
+    def get_hexagaze_roll_frame_index(hexagaze, frames, now_value):
+        return hexagaze_logic.get_roll_frame_index(hexagaze, frames, now_value, HEXAGAZE_ROLL_FRAME_TIME)
+
     def player_can_see_mannequin():
-        if not mannequin_alive or mannequin_x is None or mannequin_y is None:
-            return False
-        dx = mannequin_x - player_x
-        dy = mannequin_y - player_y
-        angle_diff = wrap_angle(math.atan2(dy, dx) - player_angle)
-        if abs(angle_diff) > math.radians(30):
-            return False
-        return has_line_of_sight(player_x, player_y, mannequin_x, mannequin_y)
+        sync_mannequin_state_to_module()
+        return mannequin_logic.player_can_see(mannequin_state, player_x, player_y, player_angle, has_line_of_sight)
 
     def mannequin_can_see_player():
-        if not mannequin_alive or mannequin_x is None or mannequin_y is None:
-            return False
-        if math.hypot(mannequin_x - player_x, mannequin_y - player_y) > mannequin_notice_radius:
-            return False
-        return has_line_of_sight(mannequin_x, mannequin_y, player_x, player_y)
+        sync_mannequin_state_to_module()
+        return mannequin_logic.can_see_player(mannequin_state, player_x, player_y, has_line_of_sight)
 
     def move_mannequin_search():
         nonlocal mannequin_x, mannequin_y
@@ -643,94 +1490,26 @@ def start_tutor_maze(root=None):
         return False
 
     def update_mannequin(delta_time):
-        nonlocal mannequin_mode, mannequin_hidden_active, mannequin_observe_distance
-        nonlocal mannequin_shot_push_cooldown, mannequin_next_search_move_at, mannequin_next_hidden_step_at
-        nonlocal running, next_action, mannequin_last_seen_by_player
-        if not mannequin_alive or elevator_active or stats_window_active or intro_active or start_cutscene_active:
-            return
-        now = time.time()
-        if mannequin_restart_at is not None:
-            return
-        mannequin_shot_push_cooldown = max(0.0, mannequin_shot_push_cooldown - delta_time)
-
-        if mannequin_mode == "search":
-            if mannequin_can_see_player():
-                switch_mannequin_to_observe()
-                return
-            if now >= mannequin_next_search_move_at:
-                move_mannequin_search()
-                mannequin_next_search_move_at = now + mannequin_search_interval
-                if mannequin_can_see_player():
-                    switch_mannequin_to_observe()
-            return
-
-        visible_to_player = player_can_see_mannequin()
-        if visible_to_player:
-            mannequin_hidden_active = False
-            mannequin_next_hidden_step_at = None
-            mannequin_last_seen_by_player = True
-            return
-
-        if not mannequin_last_seen_by_player:
-            if mannequin_hidden_active and mannequin_next_hidden_step_at is not None and now >= mannequin_next_hidden_step_at:
-                next_distance = max(1, mannequin_observe_distance - 1)
-                if teleport_mannequin_behind(next_distance):
-                    mannequin_observe_distance = next_distance
-                if mannequin_observe_distance <= 1:
-                    trigger_mannequin_attack(now)
-                    return
-                mannequin_next_hidden_step_at = now + mannequin_wait_duration
-            return
-
-        mannequin_last_seen_by_player = False
-        if not mannequin_hidden_active:
-            next_distance = max(1, mannequin_observe_distance - 1)
-            if teleport_mannequin_behind(next_distance):
-                mannequin_observe_distance = next_distance
-            if mannequin_observe_distance <= 1:
-                trigger_mannequin_attack(now)
-                return
-            mannequin_hidden_active = True
-            mannequin_next_hidden_step_at = now + mannequin_wait_duration
-            return
-
-        if mannequin_next_hidden_step_at is None:
-            mannequin_next_hidden_step_at = now + mannequin_wait_duration
-            return
-
-        if now >= mannequin_next_hidden_step_at:
-            next_distance = max(1, mannequin_observe_distance - 1)
-            if teleport_mannequin_behind(next_distance):
-                mannequin_observe_distance = next_distance
-            if mannequin_observe_distance <= 1:
-                trigger_mannequin_attack(now)
-                return
-            mannequin_next_hidden_step_at = now + mannequin_wait_duration
+        sync_mannequin_state_to_module()
+        mannequin_logic.update_state(
+            mannequin_state,
+            MAP,
+            delta_time,
+            time.time(),
+            player_x,
+            player_y,
+            player_angle,
+            has_line_of_sight,
+            is_walkable_cell,
+            elevator_active or stats_window_active or intro_active or start_cutscene_active,
+            trigger_mannequin_attack,
+        )
+        sync_mannequin_state_from_module()
 
     def push_mannequin_back():
-        nonlocal mannequin_x, mannequin_y, mannequin_observe_distance
-        current_dist = math.hypot(mannequin_x - player_x, mannequin_y - player_y)
-        target_dist = min(5, max(mannequin_observe_distance, int(round(current_dist)) + 1))
-        ring = candidate_cells_around_player(target_dist, prefer_behind=True, require_los=False)
-        if ring:
-            _, _, _, _, next_x, next_y, used_radius = ring[0]
-            next_dist = math.hypot(next_x - player_x, next_y - player_y)
-            if next_dist >= current_dist - 0.01:
-                mannequin_x = next_x
-                mannequin_y = next_y
-                mannequin_observe_distance = used_radius
-                return
-
-        ring = candidate_cells_around_player(target_dist, prefer_behind=False, require_los=True)
-        if not ring:
-            return
-        _, _, _, _, next_x, next_y, used_radius = ring[0]
-        next_dist = math.hypot(next_x - player_x, next_y - player_y)
-        if next_dist < current_dist - 0.01:
-            return
-        mannequin_x = next_x
-        mannequin_y = next_y
-        mannequin_observe_distance = used_radius
+        sync_mannequin_state_to_module()
+        mannequin_logic.push_back(mannequin_state, MAP, player_x, player_y, player_angle, has_line_of_sight, is_walkable_cell)
+        sync_mannequin_state_from_module()
 
     def trigger_mannequin_attack(now):
         nonlocal mannequin_restart_at
@@ -739,13 +1518,21 @@ def start_tutor_maze(root=None):
         play_sound_effect(mannequin_attack_sound_path)
         mannequin_restart_at = now + max(0.2, mannequin_attack_duration)
 
+    for sentry in sentries:
+        build_sentry_visible_cells(sentry)
+
     while running:
         delta = clock.tick(120) / 1000.0
         update_music(delta)
         if delta <= 0:
             delta = 1.0 / 60.0
         now = time.time()
-        if mannequin_restart_at is not None and now >= mannequin_restart_at:
+        deja_vu_visual_mix = get_deja_vu_visual_mix(now)
+        deja_vu_speed_multiplier = get_deja_vu_speed_multiplier(now)
+        if not deja_vu_active and (
+            (mannequin_restart_at is not None and now >= mannequin_restart_at)
+            or (player_restart_at is not None and now >= player_restart_at)
+        ):
             next_action = "restart"
             running = False
             continue
@@ -780,13 +1567,15 @@ def start_tutor_maze(root=None):
                             stats_window_active = False
                             elevator_active = False  # Stop elevator only after OK
                     continue
-                if mannequin_restart_at is not None:
+                if restart_pending():
                     continue
                 # Allow movement only when elevator is not active and stats are not shown
                 if elevator_active or start_cutscene_active:
                     continue
                 elif event.unicode in "12345":
                     selected_slot = int(event.unicode)
+                elif event.key == pygame.K_v:
+                    activate_deja_vu()
                 elif event.key == pygame.K_r:
                     start_reload()
                 elif event.key == pygame.K_f:
@@ -806,12 +1595,12 @@ def start_tutor_maze(root=None):
                             stats_icon_pulse_time = 0.0
                         stats_counting_active = False
                     continue
-                if mannequin_restart_at is not None:
+                if restart_pending():
                     continue
-                if event.button == 1:
-                    shoot_gun()
+                if event.button in (1, 3):
+                    use_selected_item(event.button)
             elif event.type == pygame.MOUSEWHEEL:
-                if elevator_active or stats_window_active or start_cutscene_active or mannequin_restart_at is not None or not allow_wheel_switch:
+                if elevator_active or stats_window_active or start_cutscene_active or restart_pending() or not allow_wheel_switch:
                     continue
                 if event.y > 0:
                     selected_slot -= 1
@@ -822,7 +1611,7 @@ def start_tutor_maze(root=None):
                 if selected_slot > 5:
                     selected_slot = 1
 
-        if mannequin_restart_at is not None:
+        if restart_pending():
             bob_offset = 0
             move_x = 0.0
             move_y = 0.0
@@ -912,16 +1701,17 @@ def start_tutor_maze(root=None):
             move_len = math.hypot(move_x, move_y)
             moving = move_len > 0.0
             if moving:
-                move_x = (move_x / move_len) * SPEED
-                move_y = (move_y / move_len) * SPEED
+                current_speed = SPEED * deja_vu_speed_multiplier
+                move_x = (move_x / move_len) * current_speed
+                move_y = (move_y / move_len) * current_speed
 
-            mouse_dx = pygame.mouse.get_rel()[0]
+            mouse_dx, _mouse_dy = pygame.mouse.get_rel()
             if mouse_dx:
                 player_angle = wrap_angle(player_angle + mouse_dx * MOUSE_SENSITIVITY)
 
             # Trigger lift when player is inside 'N' tile.
             # Tile-based trigger is more stable than a distance radius.
-            if (not intro_active) and lift_tiles and not elevator_active and not stats_window_active:
+            if (not intro_active) and lift_tiles and not elevator_active and not stats_window_active and not deja_vu_active:
                 tx = int(player_x)
                 ty = int(player_y)
                 if 0 <= ty < len(MAP) and 0 <= tx < len(MAP[0]) and MAP[ty][tx] == "N":
@@ -963,22 +1753,18 @@ def start_tutor_maze(root=None):
 
             cell = MAP[ty][tx] if in_bounds else "#"
 
-            if cell != "#":
+            if not is_wall(nx, player_y) and not is_blocked_by_sentry(nx, player_y):
                 player_x = nx
+            if not is_wall(player_x, ny) and not is_blocked_by_sentry(player_x, ny):
                 player_y = ny
-                # Лестницы убраны: символ 'L' теперь просто проходной пол,
-                # высота камеры (player_z) не меняется.
-                player_z = 0.0
 
-                if not is_wall(nx, ny):
-                    player_x = nx
-                    player_y = ny
+            player_z = get_floor_height(player_x, player_y)
 
-                if moving:
-                    bob_phase += 0.25
-                    bob_offset = math.sin(bob_phase) * 10 * bob_strength
-                else:
-                    bob_offset = 0
+            if moving:
+                bob_phase += 0.25
+                bob_offset = math.sin(bob_phase) * 10 * bob_strength
+            else:
+                bob_offset = 0
 
         cell = MAP[int(player_y)][int(player_x)]
         PICKUP_GUN_RADIUS = 0.55
@@ -990,8 +1776,20 @@ def start_tutor_maze(root=None):
                 else:
                     kept.append((gx, gy))
             gun_pickups = kept
+        if bomb_pickups:
+            bomb_pickups, picked_bomb = bomb_logic.pickup_bombs(bomb_pickups, player_x, player_y, PICKUP_GUN_RADIUS)
+            if picked_bomb:
+                slot2_item = "bomb"
+                if selected_slot == 2 and activator_click_animating:
+                    activator_click_animating = False
+                    activator_click_frame_index = 0
+                    activator_click_acc = 0.0
 
         update_mannequin(delta)
+        update_sentries(delta)
+        update_deja_vu(delta)
+        update_bomb_system(delta, time.time())
+        update_hand_swap(delta)
 
         shoot_frame_time = 0.05
         if gunshoot_animating:
@@ -1015,6 +1813,17 @@ def start_tutor_maze(root=None):
                     reload_anim_index = 0
                     ammo = max_ammo
 
+        punch_frame_time = 0.05
+        if punch_animating:
+            punch_acc += delta
+            frames = right_punch_frames_raw if punch_side == "right" else left_punch_frames_raw
+            while punch_acc >= punch_frame_time and punch_animating:
+                punch_acc -= punch_frame_time
+                punch_frame_index += 1
+                if punch_frame_index >= len(frames):
+                    punch_animating = False
+                    punch_frame_index = 0
+
         t = time.time()
         texture_column_cache.clear()
         flash_ref = [flash_timer]
@@ -1035,8 +1844,45 @@ def start_tutor_maze(root=None):
             delta,
             flash_ref,
             flash_duration,
+            floor_height_getter=get_floor_height,
         )
         flash_timer = flash_ref[0]
+
+        if deja_vu_active:
+            for sentry in sentries:
+                if sentry["health"] <= 0:
+                    continue
+                safe_cells = sentry["zone_cells"] - sentry["visible_cells"]
+                for cell_x, cell_y in safe_cells:
+                    ray_engine.render_sprite(
+                        sentry_safe_frames,
+                        0,
+                        cell_x + 0.5,
+                        cell_y + 0.5,
+                        0.18,
+                        depth_buffer,
+                        player_x,
+                        player_y,
+                        player_angle,
+                        bob_offset,
+                        sprite_cache,
+                        vertical_anchor="floor",
+                    )
+                for cell_x, cell_y in sentry["visible_cells"]:
+                    ray_engine.render_sprite(
+                        sentry_danger_frames,
+                        0,
+                        cell_x + 0.5,
+                        cell_y + 0.5,
+                        0.18,
+                        depth_buffer,
+                        player_x,
+                        player_y,
+                        player_angle,
+                        bob_offset,
+                        sprite_cache,
+                        vertical_anchor="floor",
+                    )
 
         if mannequin_alive:
             mannequin_frame_index = get_mannequin_frame_index()
@@ -1068,6 +1914,68 @@ def start_tutor_maze(root=None):
                 bob_offset,
                 sprite_cache,
             )
+        for bx, by in bomb_pickups:
+            ray_engine.render_sprite(
+                bomb_pickup_frames,
+                0,
+                bx,
+                by,
+                bomb_pickup_scale,
+                depth_buffer,
+                player_x,
+                player_y,
+                player_angle,
+                bob_offset,
+                sprite_cache,
+            )
+        if selected_slot == 2 and slot2_item == "bomb":
+            target_cell = get_targeted_floor_cell()
+            if target_cell is not None:
+                ray_engine.render_sprite(
+                    target_marker_frames,
+                    0,
+                    target_cell[0] + 0.5,
+                    target_cell[1] + 0.5,
+                    0.20,
+                    depth_buffer,
+                    player_x,
+                    player_y,
+                    player_angle,
+                    bob_offset,
+                    sprite_cache,
+                    vertical_anchor="floor",
+                )
+        for bomb in placed_bombs:
+            ray_engine.render_sprite(
+                bombon_frames_raw,
+                bomb_world_frame_index,
+                bomb["x"],
+                bomb["y"],
+                0.34,
+                depth_buffer,
+                player_x,
+                player_y,
+                player_angle,
+                bob_offset,
+                sprite_cache,
+                vertical_anchor="floor",
+            )
+        for explosion in active_explosions:
+            frame_index = min(explosion["frame_index"], len(boom_frames_raw) - 1)
+            ray_engine.render_sprite(
+                boom_frames_raw,
+                frame_index,
+                explosion["x"],
+                explosion["y"] + 0.12,
+                0.90,
+                depth_buffer,
+                player_x,
+                player_y,
+                player_angle,
+                bob_offset,
+                sprite_cache,
+                vertical_anchor="floor",
+            )
         for orb in orbs:
             # Only render orb if alive
             if orb["health"] > 0:
@@ -1081,6 +1989,70 @@ def start_tutor_maze(root=None):
                     bob_offset,
                     sprite_cache,
                 )
+
+        for sentry in sentries:
+            if sentry["health"] <= 0:
+                continue
+            roll_name = sentry.get("queued_roll")
+            roll_frames = hexagaze_roll_animations.get(roll_name) if roll_name else None
+            if roll_frames and sentry["burst_shots_left"] <= 0 and now < sentry.get("roll_visible_until", 0.0):
+                render_frames = roll_frames
+                render_frame_index = get_hexagaze_roll_frame_index(sentry, roll_frames, now)
+            else:
+                render_frames = hexagaze_frames
+                render_frame_index = get_hexagaze_frame_index(sentry)
+            ray_engine.render_sprite(
+                render_frames,
+                render_frame_index,
+                sentry["x"],
+                sentry["y"],
+                0.55,
+                depth_buffer,
+                player_x,
+                player_y,
+                player_angle,
+                bob_offset,
+                sprite_cache,
+            )
+
+        for projectile in sentry_projectiles:
+            ray_engine.render_sprite(
+                [orb_textures[projectile["color"]]],
+                0,
+                projectile["x"],
+                projectile["y"],
+                0.12,
+                depth_buffer,
+                player_x,
+                player_y,
+                player_angle,
+                bob_offset,
+                sprite_cache,
+            )
+
+        ghost_now = time.time()
+        for ghost_point in deja_vu_ghost_trail:
+            life_ratio = 1.0 - ((ghost_now - ghost_point["spawned_at"]) / DEJA_VU_GHOST_LIFETIME)
+            if life_ratio <= 0.0:
+                continue
+            frame_index = min(
+                len(deja_vu_ghost_frames) - 1,
+                int((1.0 - life_ratio) * len(deja_vu_ghost_frames)),
+            )
+            ghost_scale = 0.085 + life_ratio * 0.03
+            ray_engine.render_sprite(
+                deja_vu_ghost_frames,
+                frame_index,
+                ghost_point["x"],
+                ghost_point["y"],
+                ghost_scale,
+                depth_buffer,
+                player_x,
+                player_y,
+                player_angle,
+                bob_offset,
+                sprite_cache,
+            )
 
         # Render lift doors (billboard planes) during the whole elevator sequence.
         # We render even at elevator_close_t == 0 to avoid "nothing happens" frames.
@@ -1190,17 +2162,23 @@ def start_tutor_maze(root=None):
             )
 
         gun_y = game_view_h - GUN_BOTTOM_MARGIN - int(bob_offset * 0.35)
+        if (not elevator_active) and (not start_cutscene_active):
+            hand_slide_distance = int(game_view_h * 0.58)
+            hand_swap_eased = _ease_out_cubic(hand_swap_progress)
+            if hand_swap_active and hand_previous_item_id is not None:
+                previous_pil = get_hand_pil_for_item(hand_previous_item_id)
+                if previous_pil is not None:
+                    previous_surface = build_hand_surface_from_pil(previous_pil, hand_previous_item_id)
+                    previous_y = gun_y + int(hand_slide_distance * hand_swap_eased)
+                    game_surface.blit(previous_surface, previous_surface.get_rect(midbottom=(game_view_w // 2, previous_y)))
 
-        if (not elevator_active) and (not start_cutscene_active) and has_gun and selected_slot == 1:
-            if reloading and reload_anim_active:
-                pil_f = gunreload_frames_raw[min(reload_anim_index, len(gunreload_frames_raw) - 1)]
-                gs = build_gun_surface_from_pil(pil_f)
-            elif gunshoot_animating:
-                pil_f = gunshoot_frames_raw[min(gunshoot_frame_index, len(gunshoot_frames_raw) - 1)]
-                gs = build_gun_surface_from_pil(pil_f)
-            else:
-                gs = build_gun_surface_from_pil(gun_img_raw)
-            game_surface.blit(gs, gs.get_rect(midbottom=(game_view_w // 2, gun_y)))
+            current_pil = get_hand_pil_for_item(hand_target_item_id)
+            if current_pil is not None:
+                current_surface = build_hand_surface_from_pil(current_pil, hand_target_item_id)
+                current_y = gun_y
+                if hand_swap_active:
+                    current_y = gun_y + int(hand_slide_distance * (1.0 - hand_swap_eased))
+                game_surface.blit(current_surface, current_surface.get_rect(midbottom=(game_view_w // 2, current_y)))
 
         # Shake the view only after doors are closed and the hold phase ends.
         # Continue shaking while stats window is active
@@ -1248,6 +2226,43 @@ def start_tutor_maze(root=None):
         else:
             blit_game_view_upscaled(game_surface, screen, W, H)
 
+        if deja_vu_visual_mix > 0.001:
+            ghost_surface = screen.copy()
+            ghost_surface.set_alpha(int(24 + 36 * deja_vu_visual_mix))
+            ghost_shift = max(1, int(2 + 4 * deja_vu_visual_mix))
+            screen.blit(ghost_surface, (ghost_shift, 0))
+            screen.blit(ghost_surface, (-ghost_shift, 0))
+
+        if deja_vu_active:
+            overlay = pygame.Surface((W, H), pygame.SRCALPHA)
+            overlay.fill((28, 90, 96, int(20 + 32 * deja_vu_visual_mix)))
+            screen.blit(overlay, (0, 0))
+
+            pulse = (math.sin((time.time() - deja_vu_started_at) * 8.0) + 1.0) * 0.5
+            vignette_alpha = int((26 + pulse * 42) * deja_vu_visual_mix)
+            frame_surface = pygame.Surface((W, H), pygame.SRCALPHA)
+            pygame.draw.rect(frame_surface, (120, 255, 235, vignette_alpha), (10, 10, W - 20, H - 20), width=3)
+            screen.blit(frame_surface, (0, 0))
+
+        if deja_vu_return_started_at is not None:
+            rewind_progress = (time.time() - deja_vu_return_started_at) / DEJA_VU_RETURN_FADE
+            if rewind_progress >= 1.0:
+                deja_vu_return_started_at = None
+            else:
+                collapse_radius = int((1.0 - rewind_progress) * min(W, H) * 0.35)
+                collapse_surface = pygame.Surface((W, H), pygame.SRCALPHA)
+                pygame.draw.circle(
+                    collapse_surface,
+                    (200, 255, 245, int(110 * (1.0 - rewind_progress))),
+                    (W // 2, H // 2),
+                    max(12, collapse_radius),
+                    width=max(2, int(10 * (1.0 - rewind_progress) + 2)),
+                )
+                screen.blit(collapse_surface, (0, 0))
+                rewind_surface = pygame.Surface((W, H), pygame.SRCALPHA)
+                rewind_surface.fill((210, 255, 250, int(170 * (1.0 - rewind_progress))))
+                screen.blit(rewind_surface, (0, 0))
+
         task_margin = 20
         task_pad = 10
         task_box_w = 340
@@ -1268,7 +2283,7 @@ def start_tutor_maze(root=None):
         screen.blit(font_hud.render("AMMO:", True, (0, 255, 0)), (hud_x + 26, hud_y + 28))
         screen.blit(font_hud_big.render(f"{ammo}/{max_ammo}", True, (0, 255, 0)), (hud_x + 23, hud_y + 48))
 
-        hp_percent = 1.0
+        hp_percent = player_health / max(1, PLAYER_MAX_HEALTH)
         max_blocks = 10
         filled_blocks = int(max_blocks * hp_percent)
         block_size = 10
@@ -1306,6 +2321,33 @@ def start_tutor_maze(root=None):
             ),
         )
 
+        deja_now = time.time()
+        if deja_vu_active:
+            deja_display_charge = max(0.0, deja_vu_active_budget - (deja_now - deja_vu_started_at))
+        else:
+            deja_display_charge = deja_vu_charge
+        deja_ready = deja_display_charge >= DEJA_VU_MIN_ACTIVATION
+        if deja_vu_active:
+            deja_state = f"{deja_display_charge:04.1f}s"
+            deja_color = (120, 255, 235)
+        elif deja_ready and deja_vu_available():
+            deja_state = f"{deja_display_charge:04.1f}s"
+            deja_color = (120, 255, 235)
+        else:
+            if deja_now < deja_vu_recharge_available_at:
+                deja_state = f"WAIT {max(0.0, deja_vu_recharge_available_at - deja_now):03.1f}s"
+            else:
+                deja_state = f"{deja_display_charge:04.1f}s"
+            deja_color = (110, 130, 130)
+        deja_box = pygame.Rect(hud_x - 220, hud_y + 20, 190, 56)
+        pygame.draw.rect(screen, (0, 18, 18), deja_box)
+        pygame.draw.rect(screen, deja_color, deja_box, width=2)
+        screen.blit(font_hud.render("DEJA VU [V]", True, deja_color), (deja_box.x + 12, deja_box.y + 6))
+        screen.blit(font_hud_big.render(deja_state, True, deja_color), (deja_box.x + 12, deja_box.y + 26))
+        charge_fill_w = int((deja_box.width - 24) * (deja_display_charge / DEJA_VU_MAX_CHARGE))
+        pygame.draw.rect(screen, (20, 40, 40), (deja_box.x + 12, deja_box.y + deja_box.height - 10, deja_box.width - 24, 4))
+        pygame.draw.rect(screen, deja_color, (deja_box.x + 12, deja_box.y + deja_box.height - 10, charge_fill_w, 4))
+
         slot_size = 32
         slot_spacing = 6
         start_x = hud_x + hud_w // 2 - (2 * slot_size + 1.5 * slot_spacing)
@@ -1320,6 +2362,16 @@ def start_tutor_maze(root=None):
             screen.blit(ns, (x + slot_size // 2 - ns.get_width() // 2, y + slot_size + 10))
         if has_gun:
             screen.blit(gunitem_img, gunitem_img.get_rect(center=(start_x + slot_size // 2, start_y + slot_size // 2)))
+        if slot2_item == "bomb":
+            screen.blit(
+                bombitem_img,
+                bombitem_img.get_rect(center=(start_x + (slot_size + slot_spacing) + slot_size // 2, start_y + slot_size // 2)),
+            )
+        elif slot2_item == "activator":
+            screen.blit(
+                activatoritem_img,
+                activatoritem_img.get_rect(center=(start_x + (slot_size + slot_spacing) + slot_size // 2, start_y + slot_size // 2)),
+            )
 
         if mannequin_alive and mannequin_mode == "observe" and player_can_see_mannequin():
             mannequin_bar_w = 140

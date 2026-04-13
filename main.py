@@ -1,4 +1,4 @@
-# Project: Abebe Watcher(ABEBE_PROTOCOL)
+﻿# Project: Abebe Watcher(ABEBE_PROTOCOL)
 # Author: Denis Kravchenko
 # Started: Feb 10, 2026
 # All assets, story, design, and main game logic by the author.
@@ -8,7 +8,7 @@ import tkinter as tk
 from pathlib import Path
 
 from PIL import Image, ImageTk
-from utils import block_esc
+from utils import block_esc, get_exe_dir
 from password_window import show_password_window
 from intro import show_intro
 from background_music import play_music
@@ -21,7 +21,7 @@ import time
 from user_settings import load_settings
 
 APP_SETTINGS = load_settings()
-PANE_OS_DIR = Path("data") / "PaneOS"
+PANE_OS_DIR = Path(get_exe_dir()) / "data" / "PaneOS"
 PANE_BG = "#c3c3c3"
 PANE_BG_DARK = "#b8b8b8"
 PANE_BORDER_DARK = "#808080"
@@ -47,7 +47,7 @@ def init_custom_cursor(root):
     label = tk.Label(overlay, image=normal_cursor, bg=PREVIEW_TRANSPARENT, borderwidth=0, highlightthickness=0)
     label.pack()
 
-    state = {"mode": "normal"}
+    state = {"mode": "normal", "suppressed": False}
 
     def set_mode(mode):
         if state["mode"] == mode:
@@ -57,12 +57,22 @@ def init_custom_cursor(root):
         label.image = click_cursor if mode == "click" else normal_cursor
 
     def move_cursor(event):
+        if state["suppressed"]:
+            overlay.withdraw()
+            return
         overlay.geometry(f"+{event.x_root + 2}+{event.y_root + 1}")
         if not overlay.winfo_viewable():
             overlay.deiconify()
 
     def hide_cursor(_event=None):
         overlay.withdraw()
+
+    def suppress_cursor():
+        state["suppressed"] = True
+        overlay.withdraw()
+
+    def restore_cursor():
+        state["suppressed"] = False
 
     def apply_hidden_cursor(widget):
         try:
@@ -100,6 +110,8 @@ def init_custom_cursor(root):
         "register_click_canvas_item": register_click_canvas_item,
         "set_mode": set_mode,
         "move_cursor": move_cursor,
+        "suppress_cursor": suppress_cursor,
+        "restore_cursor": restore_cursor,
     }
 
 def styled_button(parent, text, command, fg=PANE_TEXT):
@@ -156,7 +168,6 @@ def create_desktop_file_icon(parent, icon_image, label_text, command, enabled=Tr
     state = {
         "enabled": enabled,
         "command": command,
-        "canvas": parent,
         "icon_item": icon_item,
         "text_shadow_item": text_shadow_item,
         "text_item": text_item,
@@ -177,7 +188,7 @@ def create_desktop_file_icon(parent, icon_image, label_text, command, enabled=Tr
 def exit_game_confirmed():
     global game_running
 
-    # закрываем ВСЕ Toplevel окна
+    # Р·Р°РєСЂС‹РІР°РµРј Р’РЎР• Toplevel РѕРєРЅР°
     for w in root.winfo_children():
         if isinstance(w, tk.Toplevel):
             w.destroy()
@@ -238,126 +249,34 @@ def show_splash(root):
     splash.configure(bg="black")
     splash.attributes("-fullscreen", True)
     splash.attributes("-alpha", 1.0)
+    splash.config(cursor="none")
+    root.config(cursor="none")
+    cursor_api = getattr(root, "_cursor_api", None)
+    if cursor_api is not None:
+        cursor_api["suppress_cursor"]()
 
     splash.lift()
     splash.attributes("-topmost", True)
     splash.after(10, lambda: splash.attributes("-topmost", False))
 
-    # ===== Skip control =====
     skip_requested = [False]
+    interaction_enabled = [False]
+    signed_enough = [False]
+    drawing_state = {"active": False, "last_x": None, "last_y": None, "ink": 0.0}
 
     def skip_splash(event=None):
         if not skip_requested[0]:
             skip_requested[0] = True
+            root.config(cursor="")
+            if cursor_api is not None:
+                cursor_api["restore_cursor"]()
             splash.destroy()
 
-    splash.bind("<Key>", skip_splash)
-    splash.bind("<Button-1>", skip_splash)
+    splash.bind("<Escape>", skip_splash)
     splash.focus_set()
 
-    # ===== Console text widget =====
-    text_widget = tk.Label(
-        splash,
-        text="",
-        fg="lime",
-        bg="black",
-        font=("Terminal", 16),
-        justify="left",
-        anchor="nw"
-    )
-    text_widget.place(x=40, y=40)
-
-    # ===== Boot lines =====
-    lines = [
-        "Booting ABEBE_PROTOCOL v0.2.3-alpha...",
-        "",
-        "Loading core modules...",
-        "Loading security layer...",
-        "Initializing trust system...",
-        "Injecting watcher module...",
-        "Watcher status: ONLINE",
-        "",
-        "Checking system integrity...",
-        "Verifying employee database...",
-        "",
-        "Project: Abebe Protocol",
-        "Author: Denis Kravchenko (Mr. Banandee)",
-        "",
-        "Finalizing boot sequence...",
-        "System ready.",
-        "",
-        "WARNING: Suspicious presence detected.",
-        "Analyzing entity...",
-        "ACCESS LEVEL: UNKNOWN",
-        "CRITICAL SECURITY FAILURE",
-        "SYSTEM WILL SHUT DOWN"
-    ]
-
-    final_message = "\n\nJust kidding.\nWelcome back."
-
-    full_text = [""]
-    line_index = [0]
-    warning_triggered = [False]
-    
     game_state.init_game_state(root, open_game_btn)
-    
 
-    
-    # ===== Typing logic =====
-    def type_next_line():
-        if skip_requested[0]:
-            return
-
-        if line_index[0] >= len(lines):
-            splash.after(2000, show_final_phase)
-            return
-
-        current_line = lines[line_index[0]] + "\n"
-        char_index = [0]
-
-        def type_char():
-            if skip_requested[0]:
-                return
-
-            if char_index[0] < len(current_line):
-                full_text[0] += current_line[char_index[0]]
-                text_widget.config(text=full_text[0])
-                char_index[0] += 1
-                splash.after(35, type_char)
-            else:
-                # После WARNING делаем текст красным
-                if "WARNING: Suspicious presence detected." in current_line:
-                    text_widget.config(fg="red")
-                    warning_triggered[0] = True
-
-                line_index[0] += 1
-                splash.after(300, type_next_line)
-
-        type_char()
-
-    # ===== Final phase =====
-    def show_final_phase():
-        if skip_requested[0]:
-            return
-
-        text_widget.config(fg="lime")
-        char_index = [0]
-
-        def type_final():
-            if skip_requested[0]:
-                return
-
-            if char_index[0] < len(final_message):
-                full_text[0] += final_message[char_index[0]]
-                text_widget.config(text=full_text[0])
-                char_index[0] += 1
-                splash.after(45, type_final)
-            else:
-                splash.after(2000, fade_out)
-
-        type_final()
-
-    # ===== Fade out =====
     def fade_out(alpha=1.0):
         if skip_requested[0]:
             return
@@ -366,13 +285,235 @@ def show_splash(root):
             splash.attributes("-alpha", alpha)
             splash.after(50, fade_out, alpha - 0.05)
         else:
+            root.config(cursor="")
+            if cursor_api is not None:
+                cursor_api["restore_cursor"]()
             splash.destroy()
 
-    splash.after(700, type_next_line)
+    hands_dir = Path(get_exe_dir()) / "data" / "gifs" / "hands"
+    left_source = Image.open(hands_dir / "LPen.png")
+    right_source = Image.open(hands_dir / "RPen.png")
+    contract_source = Image.open(hands_dir / "Contract.png")
+
+    sw = splash.winfo_screenwidth()
+    sh = splash.winfo_screenheight()
+    center_x = sw // 2
+    center_y = sh // 2
+
+    contract_w = max(320, int(sw * 0.22))
+    contract_h = int(contract_w * (contract_source.height / contract_source.width))
+    hand_h = int(contract_h * 0.31)
+
+    def make_photo(image, target_h):
+        target_w = int(target_h * (image.width / image.height))
+        resized = image.resize((target_w, target_h), Image.NEAREST)
+        return ImageTk.PhotoImage(resized), target_w
+
+    left_photo, left_w = make_photo(left_source, hand_h)
+    right_photo, right_w = make_photo(right_source, hand_h)
+    contract_photo = ImageTk.PhotoImage(contract_source.resize((contract_w, contract_h), Image.NEAREST))
+    splash._splash_images = (left_photo, right_photo, contract_photo)
+
+    canvas = tk.Canvas(splash, bg="black", highlightthickness=0, bd=0, cursor="none")
+    canvas.pack(fill="both", expand=True)
+
+    spacing = int(contract_w * 0.16)
+    left_x = center_x - (contract_w // 2) - spacing - (left_w // 2)
+    right_x = center_x + (contract_w // 2) + spacing + (right_w // 2)
+    hand_y = center_y + 6
+    intro_jitter_job = [None]
+    pen_motion = {"target_x": right_x, "target_y": hand_y, "current_x": right_x, "current_y": hand_y, "tick": 0}
+
+    contract_item = canvas.create_image(center_x, center_y, image=contract_photo, state="hidden")
+    left_item = canvas.create_image(left_x, hand_y, image=left_photo, state="hidden")
+    right_item = canvas.create_image(right_x, hand_y, image=right_photo, state="hidden")
+
+    title_box = canvas.create_rectangle(
+        center_x - 170,
+        max(34, sh // 10) - 24,
+        center_x + 170,
+        max(34, sh // 10) + 24,
+        fill="#c3c3c3",
+        outline="#808080",
+        width=3,
+        state="hidden",
+    )
+    title_item = canvas.create_text(
+        center_x,
+        max(64, sh // 9),
+        text="SIGN THE CONTRACT",
+        fill="black",
+        font=("Terminal", 20),
+        state="hidden",
+    )
+
+    sign_left = center_x - int(contract_w * 0.16)
+    sign_right = center_x + int(contract_w * 0.42)
+    sign_top = center_y + int(contract_h * 0.35)
+    sign_bottom = center_y + int(contract_h * 0.47)
+    sign_box = canvas.create_rectangle(
+        sign_left,
+        sign_top,
+        sign_right,
+        sign_bottom,
+        outline="#5f5f5f",
+        dash=(5, 3),
+        width=2,
+        state="hidden",
+    )
+    hint_item = canvas.create_text(
+        center_x,
+        sh - 42,
+        text="Hold left mouse button and sign inside the box",
+        fill="#d0d0d0",
+        font=("Terminal", 14),
+        state="hidden",
+    )
+
+    def reveal_contract():
+        if skip_requested[0]:
+            return
+        canvas.itemconfigure(contract_item, state="normal")
+        splash.after(320, reveal_left)
+
+    def reveal_left():
+        if skip_requested[0]:
+            return
+        canvas.itemconfigure(left_item, state="normal")
+        splash.after(320, reveal_right)
+
+    def reveal_right():
+        if skip_requested[0]:
+            return
+        canvas.itemconfigure(right_item, state="normal")
+        pen_motion["current_x"] = right_x + 40
+        pen_motion["current_y"] = hand_y + 14
+        pen_motion["target_x"] = right_x
+        pen_motion["target_y"] = hand_y
+        canvas.coords(right_item, pen_motion["current_x"], pen_motion["current_y"])
+
+        def settle(step=0):
+            if skip_requested[0]:
+                return
+            progress = min(step / 12, 1.0)
+            current_x = (right_x + 40) - int(40 * progress)
+            current_y = (hand_y + 14) - int(14 * progress)
+            pen_motion["current_x"] = current_x
+            pen_motion["current_y"] = current_y
+            pen_motion["target_x"] = current_x
+            pen_motion["target_y"] = current_y
+            canvas.coords(right_item, current_x, current_y)
+            if progress < 1.0:
+                splash.after(55, lambda: settle(step + 1))
+            else:
+                start_intro_jitter()
+                splash.after(420, enable_signing)
+
+        settle()
+
+    def start_intro_jitter():
+        if skip_requested[0] or interaction_enabled[0]:
+            return
+
+        phase = {"tick": 0}
+
+        def jitter():
+            if skip_requested[0] or interaction_enabled[0]:
+                return
+            phase["tick"] += 1
+            dx = -1 if phase["tick"] % 2 == 0 else 1
+            dy = 0.5 if phase["tick"] % 3 == 0 else -0.5
+            canvas.coords(right_item, right_x + dx, hand_y + dy)
+            intro_jitter_job[0] = splash.after(95, jitter)
+
+        jitter()
+
+    def is_in_sign_area(x, y):
+        return sign_left <= x <= sign_right and sign_top <= y <= sign_bottom
+
+    def maybe_finish():
+        if signed_enough[0] or drawing_state["ink"] < 180:
+            return
+        signed_enough[0] = True
+        canvas.itemconfigure(hint_item, text="CONTRACT ACCEPTED", fill="white")
+        splash.after(700, fade_out)
+
+    pen_anchor_offset_x = -90
+    pen_anchor_offset_y = -60
+
+    def move_pen(x, y):
+        if skip_requested[0]:
+            return
+        pen_motion["target_x"] = x - pen_anchor_offset_x
+        pen_motion["target_y"] = y + pen_anchor_offset_y
+        canvas.tag_raise(right_item)
+
+    def animate_pen():
+        if skip_requested[0]:
+            return
+        pen_motion["tick"] += 1
+        pen_motion["current_x"] = pen_motion["target_x"]
+        pen_motion["current_y"] = pen_motion["target_y"]
+        jitter_x = -0.6 if pen_motion["tick"] % 2 == 0 else 0.6
+        jitter_y = 0.45 if pen_motion["tick"] % 3 == 0 else -0.45
+        canvas.coords(
+            right_item,
+            pen_motion["current_x"] + jitter_x,
+            pen_motion["current_y"] + jitter_y,
+        )
+        canvas.tag_raise(right_item)
+        splash.after(16, animate_pen)
+
+    def on_motion(event):
+        if not interaction_enabled[0]:
+            return
+        move_pen(event.x, event.y)
+        if drawing_state["active"] and drawing_state["last_x"] is not None and is_in_sign_area(event.x, event.y):
+            last_x = drawing_state["last_x"]
+            last_y = drawing_state["last_y"]
+            canvas.create_line(last_x, last_y, event.x, event.y, fill="#111111", width=2, capstyle=tk.ROUND, smooth=True)
+            canvas.tag_raise(right_item)
+            drawing_state["ink"] += abs(event.x - last_x) + abs(event.y - last_y)
+        drawing_state["last_x"] = event.x
+        drawing_state["last_y"] = event.y
+
+    def on_press(event):
+        if not interaction_enabled[0]:
+            return
+        drawing_state["active"] = is_in_sign_area(event.x, event.y)
+        drawing_state["last_x"] = event.x
+        drawing_state["last_y"] = event.y
+        move_pen(event.x, event.y)
+
+    def on_release(_event):
+        if drawing_state["active"]:
+            maybe_finish()
+        drawing_state["active"] = False
+        drawing_state["last_x"] = None
+        drawing_state["last_y"] = None
+
+    def enable_signing():
+        if skip_requested[0]:
+            return
+        if intro_jitter_job[0] is not None:
+            splash.after_cancel(intro_jitter_job[0])
+            intro_jitter_job[0] = None
+        interaction_enabled[0] = True
+        pen_motion["target_x"] = pen_motion["current_x"]
+        pen_motion["target_y"] = pen_motion["current_y"]
+        canvas.itemconfigure(title_box, state="normal")
+        canvas.itemconfigure(title_item, state="normal")
+        canvas.itemconfigure(sign_box, state="normal")
+        canvas.itemconfigure(hint_item, state="normal")
+
+    canvas.bind("<Motion>", on_motion)
+    canvas.bind("<ButtonPress-1>", on_press)
+    canvas.bind("<ButtonRelease-1>", on_release)
+    splash.after(16, animate_pen)
+
+    splash.after(450, reveal_contract)
 
     return splash
-
-
 
 def exit_app():
     root.destroy()

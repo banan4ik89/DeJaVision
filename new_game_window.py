@@ -7,9 +7,10 @@ import testing_maze
 from game_launcher import run_pygame_session
 from settings_window import make_draggable
 from user_settings import load_settings, save_settings
+from utils import get_exe_dir
 
 
-PANE_OS_DIR = Path("data") / "PaneOS"
+PANE_OS_DIR = Path(get_exe_dir()) / "data" / "PaneOS"
 WINDOW_SIZE = (760, 500)
 WINDOW_IMAGE_SIZE = (WINDOW_SIZE[0], WINDOW_SIZE[1])
 PANE_BG = "#c3c3c3"

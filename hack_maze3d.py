@@ -19,6 +19,7 @@ from raycast_engine import (
     render_sprite_hack_square,
 )
 from user_settings import get_fov_radians, get_game_view_size, get_show_debug_stats, get_show_fps, get_view_bob
+from utils import get_exe_dir
 
 MAX_DEPTH = 20
 RAY_STEP = 0.05
@@ -49,11 +50,7 @@ MAP_TEMPLATE = [
 
 
 def resource_path(relative_path):
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
+    return os.path.join(get_exe_dir(), relative_path)
 
 
 def load_gif_frames(path):

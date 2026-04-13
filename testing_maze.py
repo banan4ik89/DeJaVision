@@ -16,6 +16,7 @@ from maze_pygame_common import (
     draw_hud_base,
     make_font,
 )
+from maze_entities import BOMB_SYMBOL, HEXAGAZE_SYMBOL, MANNEQUIN_SYMBOL
 from pause_menu import run_pause_menu
 from raycast_engine import NUM_RAYS, RaycastEngine, draw_floor_ceiling, pil_to_surface
 from user_settings import (
@@ -25,12 +26,11 @@ from user_settings import (
     get_show_fps,
     get_view_bob,
 )
+from utils import get_exe_dir
 
 SPEED = 0.17
-TURN_SMOOTH = 26.0
-ROT_RATE = 3.6
-ROT_SUBSTEPS = 8
 GUN_BOTTOM_MARGIN = -14
+MOUSE_SENSITIVITY = 0.0035
 
 MAP = [
     ".........###............",
@@ -55,11 +55,7 @@ MAP = [
 
 
 def resource_path(relative_path):
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
+    return os.path.join(get_exe_dir(), relative_path)
 
 
 def load_gif_frames(path):
@@ -85,7 +81,35 @@ def is_wall(x, y):
     return MAP[int(y)][int(x)] == "#"
 
 
+def get_floor_height(x, y):
+    if x < 0 or y < 0:
+        return 0.0
+    if int(y) >= len(MAP):
+        return 0.0
+    if int(x) >= len(MAP[0]):
+        return 0.0
+    cell = MAP[int(y)][int(x)]
+    if cell == "P":
+        return 0.35
+    if cell == "E":
+        return 0.18
+    return 0.0
+
+
+def wrap_angle(angle):
+    while angle > math.pi:
+        angle -= 2 * math.pi
+    while angle < -math.pi:
+        angle += 2 * math.pi
+    return angle
+
+
 def start_testing_maze(root=None):
+    # Shared entity systems are available for future use through `maze_entities`.
+    # To enable them in this or another maze level later:
+    # - place `BOMB_SYMBOL`, `MANNEQUIN_SYMBOL`, or `HEXAGAZE_SYMBOL` on MAP
+    # - initialize the matching module state/assets inside the level
+    # Nothing is spawned here yet by design.
     game_view_w, game_view_h = get_game_view_size()
     bob_strength = get_view_bob()
     allow_wheel_switch = get_mouse_wheel_weapon_switch()
@@ -98,6 +122,8 @@ def start_testing_maze(root=None):
     pygame.display.set_caption("TESTING")
     clock = pygame.time.Clock()
     pygame.mouse.set_visible(False)
+    pygame.event.set_grab(True)
+    pygame.mouse.get_rel()
 
     font_hud = make_font(16)
     font_hud_big = make_font(18)
@@ -127,7 +153,7 @@ def start_testing_maze(root=None):
     player_start_cutscene_offset = 2.0
     player_x = player_spawn_x - player_start_cutscene_offset
     player_y = player_spawn_y
-    player_z = 0.0
+    player_z = get_floor_height(player_x, player_y)
     player_angle = 0.0
 
     gun_img_raw = Image.open(resource_path("data/gifs/hands/gun.png")).convert("RGBA")
@@ -252,8 +278,6 @@ def start_testing_maze(root=None):
     reload_anim_active = False
     shoot_acc = 0.0
     reload_acc = 0.0
-    turn_smooth = 0.0
-
     running = True
     next_action = None
 
@@ -313,6 +337,9 @@ def start_testing_maze(root=None):
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     pause_action = run_pause_menu(screen, clock, root, W, H, title="Paused")
+                    pygame.event.set_grab(True)
+                    pygame.mouse.set_visible(False)
+                    pygame.mouse.get_rel()
                     if pause_action == "restart":
                         next_action = "restart"
                         running = False
@@ -384,17 +411,33 @@ def start_testing_maze(root=None):
             keys["a"] = k[pygame.K_a]
             keys["d"] = k[pygame.K_d]
 
+            mouse_dx, _mouse_dy = pygame.mouse.get_rel()
+            player_angle = wrap_angle(player_angle + mouse_dx * MOUSE_SENSITIVITY)
+
             move_x = 0.0
             move_y = 0.0
-            moving = False
+            forward_x = math.cos(player_angle)
+            forward_y = math.sin(player_angle)
+            right_x = math.cos(player_angle + math.pi / 2)
+            right_y = math.sin(player_angle + math.pi / 2)
             if keys["w"]:
-                move_x += math.cos(player_angle) * SPEED
-                move_y += math.sin(player_angle) * SPEED
-                moving = True
+                move_x += forward_x
+                move_y += forward_y
             if keys["s"]:
-                move_x -= math.cos(player_angle) * SPEED
-                move_y -= math.sin(player_angle) * SPEED
-                moving = True
+                move_x -= forward_x
+                move_y -= forward_y
+            if keys["a"]:
+                move_x -= right_x
+                move_y -= right_y
+            if keys["d"]:
+                move_x += right_x
+                move_y += right_y
+
+            move_len = math.hypot(move_x, move_y)
+            moving = move_len > 0.0
+            if moving:
+                move_x = (move_x / move_len) * SPEED
+                move_y = (move_y / move_len) * SPEED
 
         for lk in light_states:
             if time.time() - light_timers[lk] > random.uniform(0.05, 0.3):
@@ -404,28 +447,13 @@ def start_testing_maze(root=None):
 
         nx = player_x + move_x
         ny = player_y + move_y
-        cell = MAP[int(ny)][int(nx)]
 
-        if cell != "#":
+        if not is_wall(nx, player_y):
             player_x = nx
-            player_y = ny
-            # Лестницы убраны: символ 'L' теперь просто проходной пол,
-            # высота камеры (player_z) не меняется.
-            player_z = 0.0
-
-        if not is_wall(nx, ny):
-            player_x = nx
+        if not is_wall(player_x, ny):
             player_y = ny
 
-        want_turn = 0.0
-        if keys["a"]:
-            want_turn -= 1.0
-        if keys["d"]:
-            want_turn += 1.0
-        ds = delta / ROT_SUBSTEPS
-        for _ in range(ROT_SUBSTEPS):
-            turn_smooth += (want_turn - turn_smooth) * min(1.0, TURN_SMOOTH * ds)
-            player_angle += turn_smooth * ROT_RATE * ds
+        player_z = get_floor_height(player_x, player_y)
 
         if moving:
             bob_phase += 0.25
@@ -475,6 +503,7 @@ def start_testing_maze(root=None):
             delta,
             flash_ref,
             flash_duration,
+            floor_height_getter=get_floor_height,
         )
         flash_timer = flash_ref[0]
 
@@ -669,6 +698,7 @@ def start_testing_maze(root=None):
 
         pygame.display.flip()
 
+    pygame.event.set_grab(False)
     pygame.mouse.set_visible(True)
     pygame.quit()
     if next_action == "restart":
@@ -676,3 +706,9 @@ def start_testing_maze(root=None):
 
 
 start_game = start_testing_maze
+
+
+def start_game_opengl(root=None):
+    from opengl_testing_maze import start_testing_maze_opengl
+
+    return start_testing_maze_opengl(root)

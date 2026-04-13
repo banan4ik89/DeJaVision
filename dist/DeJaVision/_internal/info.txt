@@ -1,0 +1,21 @@
+Hello World!
+TEST GAME - ABEBE_PROTOCOL.EXE
+Version: 0.2.0-alpha
+
+Author: Mr. Banandee
+
+Description:
+This is an early test version of the game, demonstrating:
+- Password input system
+- Fake hacker mini-games
+- File gallery
+- Interactive commands
+
+Available commands via password input starting with "!" :
+!help - show list of commands
+!history - show password history
+!gallery - open gallery
+!abebe_watcher - restart the watcher
+!info - show this info screen
+
+Status: early version, game still in development.

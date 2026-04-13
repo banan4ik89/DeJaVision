@@ -5,9 +5,10 @@ from PIL import Image, ImageTk
 
 from background_music import apply_music_settings, resume_music, stop_music
 from user_settings import DEFAULT_SETTINGS, PIXEL_PRESETS, load_settings, save_settings
+from utils import get_exe_dir
 
 
-PANE_OS_DIR = Path("data") / "PaneOS"
+PANE_OS_DIR = Path(get_exe_dir()) / "data" / "PaneOS"
 WINDOW_SIZE = (760, 500)
 WINDOW_IMAGE_SIZE = (WINDOW_SIZE[0], WINDOW_SIZE[1])
 PANE_BG = "#c3c3c3"
@@ -489,6 +490,10 @@ def show_settings(root):
 
     flash_var = tk.BooleanVar(value=current_settings["flash_enabled"])
     wheel_switch_var = tk.BooleanVar(value=current_settings["mouse_wheel_weapon_switch"])
+    impact_particles_var = tk.BooleanVar(value=current_settings["impact_particles_enabled"])
+    bullet_marks_var = tk.BooleanVar(value=current_settings["bullet_marks_enabled"])
+    screen_effects_var = tk.BooleanVar(value=current_settings["screen_effects_enabled"])
+    rear_culling_var = tk.BooleanVar(value=current_settings["rear_world_culling_enabled"])
     show_fps_var = tk.BooleanVar(value=current_settings["show_fps"])
     show_debug_var = tk.BooleanVar(value=current_settings["show_debug_stats"])
 
@@ -514,6 +519,62 @@ def show_settings(root):
         text="Mouse Wheel Weapon Switch",
         variable=wheel_switch_var,
         command=lambda: save_settings({"mouse_wheel_weapon_switch": wheel_switch_var.get()}),
+        fg=PANE_TEXT,
+        bg=PANE_BG,
+        selectcolor=PANE_BG,
+        activebackground=PANE_BG,
+        activeforeground=PANE_TEXT,
+        font=("Terminal", 12),
+        anchor="w",
+    ).pack(anchor="w", pady=(0, 10))
+
+    tk.Checkbutton(
+        general,
+        text="Impact Particles",
+        variable=impact_particles_var,
+        command=lambda: save_settings({"impact_particles_enabled": impact_particles_var.get()}),
+        fg=PANE_TEXT,
+        bg=PANE_BG,
+        selectcolor=PANE_BG,
+        activebackground=PANE_BG,
+        activeforeground=PANE_TEXT,
+        font=("Terminal", 12),
+        anchor="w",
+    ).pack(anchor="w", pady=(0, 10))
+
+    tk.Checkbutton(
+        general,
+        text="Bullet Marks",
+        variable=bullet_marks_var,
+        command=lambda: save_settings({"bullet_marks_enabled": bullet_marks_var.get()}),
+        fg=PANE_TEXT,
+        bg=PANE_BG,
+        selectcolor=PANE_BG,
+        activebackground=PANE_BG,
+        activeforeground=PANE_TEXT,
+        font=("Terminal", 12),
+        anchor="w",
+    ).pack(anchor="w", pady=(0, 10))
+
+    tk.Checkbutton(
+        general,
+        text="Screen Effects",
+        variable=screen_effects_var,
+        command=lambda: save_settings({"screen_effects_enabled": screen_effects_var.get()}),
+        fg=PANE_TEXT,
+        bg=PANE_BG,
+        selectcolor=PANE_BG,
+        activebackground=PANE_BG,
+        activeforeground=PANE_TEXT,
+        font=("Terminal", 12),
+        anchor="w",
+    ).pack(anchor="w", pady=(0, 10))
+
+    tk.Checkbutton(
+        general,
+        text="Rear World Culling",
+        variable=rear_culling_var,
+        command=lambda: save_settings({"rear_world_culling_enabled": rear_culling_var.get()}),
         fg=PANE_TEXT,
         bg=PANE_BG,
         selectcolor=PANE_BG,

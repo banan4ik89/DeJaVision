@@ -1,16 +1,15 @@
 import json
 from pathlib import Path
+from utils import get_app_dir
 
 
-SETTINGS_FILE = Path(__file__).with_name("user_settings.json")
+SETTINGS_FILE = Path(get_app_dir()) / "user_settings.json"
 
 PIXEL_PRESETS = {
-    "ULTRA_HD(trust_me) // 640": (640, 320),
-    "CLassic // 320": (320, 200),
-    "Totally_Stable_Build // 256": (256, 160),
-    "Low_Budget // 200": (200, 125),
-    "PS1_style // 160": (160, 100),
-    "Nokia_experience // 128": (128, 80),
+    "ULTRA_HD(trustme)": (640, 360),
+    "Almost_HD, bro": (854, 480),
+    "Deluxe Ultra Mega PLus Edition": (960, 540),
+    "Fake_HD_mode": (1280, 720),
 }
 
 DEFAULT_SETTINGS = {
@@ -19,12 +18,16 @@ DEFAULT_SETTINGS = {
     "master_volume": 1.0,
     "sfx_volume": 0.8,
     "fullscreen": True,
-    "pixel_preset": "CLassic // 320",
+    "pixel_preset": "Almost_HD, bro",
     "brightness": 1.0,
     "view_bob": 1.0,
     "fov_degrees": 60.0,
     "flash_enabled": True,
     "mouse_wheel_weapon_switch": True,
+    "impact_particles_enabled": True,
+    "bullet_marks_enabled": True,
+    "screen_effects_enabled": True,
+    "rear_world_culling_enabled": True,
     "show_fps": False,
     "show_debug_stats": False,
     "selected_save_slot": None,
@@ -50,6 +53,10 @@ def _normalize_settings(data):
     settings["fullscreen"] = bool(settings["fullscreen"])
     settings["flash_enabled"] = bool(settings["flash_enabled"])
     settings["mouse_wheel_weapon_switch"] = bool(settings["mouse_wheel_weapon_switch"])
+    settings["impact_particles_enabled"] = bool(settings["impact_particles_enabled"])
+    settings["bullet_marks_enabled"] = bool(settings["bullet_marks_enabled"])
+    settings["screen_effects_enabled"] = bool(settings["screen_effects_enabled"])
+    settings["rear_world_culling_enabled"] = bool(settings["rear_world_culling_enabled"])
     settings["show_fps"] = bool(settings["show_fps"])
     settings["show_debug_stats"] = bool(settings["show_debug_stats"])
     selected_save_slot = settings.get("selected_save_slot")
@@ -152,6 +159,22 @@ def get_fov_radians():
 
 def get_mouse_wheel_weapon_switch():
     return bool(load_settings()["mouse_wheel_weapon_switch"])
+
+
+def get_impact_particles_enabled():
+    return bool(load_settings()["impact_particles_enabled"])
+
+
+def get_bullet_marks_enabled():
+    return bool(load_settings()["bullet_marks_enabled"])
+
+
+def get_screen_effects_enabled():
+    return bool(load_settings()["screen_effects_enabled"])
+
+
+def get_rear_world_culling_enabled():
+    return bool(load_settings()["rear_world_culling_enabled"])
 
 
 def get_show_fps():

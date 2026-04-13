@@ -8,6 +8,7 @@ import pygame
 from PIL import Image
 
 from background_music import play_overlay_music, stop_overlay_music, update_music
+from maze_entities import BOMB_SYMBOL, HEXAGAZE_SYMBOL, MANNEQUIN_SYMBOL
 from maze_pygame_common import GAME_VIEW_H, GAME_VIEW_W, blit_game_view_upscaled
 from pause_menu import run_pause_menu
 from raycast_engine import NUM_RAYS, RaycastEngine, draw_floor_ceiling, pil_to_surface
@@ -21,17 +22,17 @@ from user_settings import (
     get_show_fps,
     get_view_bob,
 )
+from utils import get_exe_dir
 
 SPEED = 0.17
-TURN_SMOOTH = 26.0
-ROT_RATE = 3.6
-ROT_SUBSTEPS = 8
 GUN_BOTTOM_MARGIN = -14
+MOUSE_SENSITIVITY = 0.0035
 
 MINIMAP_SCALE = 14
 
 #G - gun pickup
 #N - lift trigger
+#BOMB_SYMBOL / #MANNEQUIN_SYMBOL / #HEXAGAZE_SYMBOL are available for future shared entity placement
 #E - enemy (replaced by orbs)
 #S - skyscraper (tall wall)
 #I - invisible wall (collision but not rendered)
@@ -135,11 +136,7 @@ def get_player_spawn():
 
 
 def resource_path(relative_path):
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
+    return os.path.join(get_exe_dir(), relative_path)
 
 
 def load_gif_frames(path):
@@ -175,6 +172,14 @@ def _make_font(size, bold=False):
     return pygame.font.Font(None, size)
 
 
+def wrap_angle(angle):
+    while angle > math.pi:
+        angle -= 2 * math.pi
+    while angle < -math.pi:
+        angle += 2 * math.pi
+    return angle
+
+
 def start_city_maze(root=None):
     game_view_w, game_view_h = get_game_view_size()
     flash_enabled = get_flash_enabled()
@@ -188,6 +193,8 @@ def start_city_maze(root=None):
     pygame.display.set_caption("TRAINING_SIM")
     clock = pygame.time.Clock()
     pygame.mouse.set_visible(False)
+    pygame.event.set_grab(True)
+    pygame.mouse.get_rel()
 
     font_title = _make_font(14, bold=True)
     font_hud = _make_font(16)
@@ -295,6 +302,18 @@ def start_city_maze(root=None):
         if cell == SKYSCRAPER_TILE:
             return "bottom"
         return "center"
+
+    def get_floor_height(x, y):
+        cell = get_map_cell(x, y)
+        if cell == "N":
+            return 0.45
+        if cell == "G":
+            return 0.2
+        if cell == "P":
+            return 0.25
+        return 0.0
+
+    player_z = get_floor_height(player_x, player_y)
 
     for y, row in enumerate(MAP):
         for x, c in enumerate(row):
@@ -557,6 +576,9 @@ def start_city_maze(root=None):
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     pause_action = run_pause_menu(screen, clock, root, W, H, title="Paused")
+                    pygame.event.set_grab(True)
+                    pygame.mouse.set_visible(False)
+                    pygame.mouse.get_rel()
                     if pause_action == "restart":
                         next_action = "restart"
                         running = False
@@ -673,17 +695,33 @@ def start_city_maze(root=None):
             keys["a"] = k[pygame.K_a]
             keys["d"] = k[pygame.K_d]
 
+            mouse_dx, _mouse_dy = pygame.mouse.get_rel()
+            player_angle = wrap_angle(player_angle + mouse_dx * MOUSE_SENSITIVITY)
+
             move_x = 0.0
             move_y = 0.0
-            moving = False
+            forward_x = math.cos(player_angle)
+            forward_y = math.sin(player_angle)
+            right_x = math.cos(player_angle + math.pi / 2)
+            right_y = math.sin(player_angle + math.pi / 2)
             if keys["w"]:
-                move_x += math.cos(player_angle) * SPEED
-                move_y += math.sin(player_angle) * SPEED
-                moving = True
+                move_x += forward_x
+                move_y += forward_y
             if keys["s"]:
-                move_x -= math.cos(player_angle) * SPEED
-                move_y -= math.sin(player_angle) * SPEED
-                moving = True
+                move_x -= forward_x
+                move_y -= forward_y
+            if keys["a"]:
+                move_x -= right_x
+                move_y -= right_y
+            if keys["d"]:
+                move_x += right_x
+                move_y += right_y
+
+            move_len = math.hypot(move_x, move_y)
+            moving = move_len > 0.0
+            if moving:
+                move_x = (move_x / move_len) * SPEED
+                move_y = (move_y / move_len) * SPEED
 
             # Trigger lift when player is inside 'N' tile.
             # Tile-based trigger is more stable than a distance radius.
@@ -729,28 +767,18 @@ def start_city_maze(root=None):
 
             cell = MAP[ty][tx] if in_bounds else "#"
 
-            if not is_collision_wall(nx, ny):
+            if not is_collision_wall(nx, player_y):
                 player_x = nx
+            if not is_collision_wall(player_x, ny):
                 player_y = ny
-                # Лестницы убраны: символ 'L' теперь просто проходной пол,
-                # высота камеры (player_z) не меняется.
-                player_z = 0.0
 
-                want_turn = 0.0
-                if keys["a"]:
-                    want_turn -= 1.0
-                if keys["d"]:
-                    want_turn += 1.0
-                ds = delta / ROT_SUBSTEPS
-                for _ in range(ROT_SUBSTEPS):
-                    turn_smooth += (want_turn - turn_smooth) * min(1.0, TURN_SMOOTH * ds)
-                    player_angle += turn_smooth * ROT_RATE * ds
+            player_z = get_floor_height(player_x, player_y)
 
-                if moving:
-                    bob_phase += 0.25
-                    bob_offset = math.sin(bob_phase) * 10 * bob_strength
-                else:
-                    bob_offset = 0
+            if moving:
+                bob_phase += 0.25
+                bob_offset = math.sin(bob_phase) * 10 * bob_strength
+            else:
+                bob_offset = 0
 
         cell = MAP[int(player_y)][int(player_x)]
         PICKUP_GUN_RADIUS = 0.55
@@ -808,6 +836,7 @@ def start_city_maze(root=None):
             wall_texture_getter=get_wall_texture,
             wall_height_getter=get_wall_height,
             wall_vertical_anchor_getter=get_wall_vertical_anchor,
+            floor_height_getter=get_floor_height,
         )
         flash_timer = flash_ref[0]
 
@@ -1406,6 +1435,7 @@ def start_city_maze(root=None):
 
         pygame.display.flip()
 
+    pygame.event.set_grab(False)
     pygame.mouse.set_visible(True)
     pygame.quit()
 
