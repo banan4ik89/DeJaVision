@@ -1,1 +1,5 @@
-﻿from abebe import app as _app
+from abebe.pygame_main_menu import run
+
+
+if __name__ == "__main__":
+    run()

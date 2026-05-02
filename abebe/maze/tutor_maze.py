@@ -13,6 +13,7 @@ from abebe.core.background_music import play_overlay_music, play_sound_effect, s
 from abebe.entities import bomb as bomb_logic
 from abebe.entities import hexagaze as hexagaze_logic
 from abebe.entities import mannequin as mannequin_logic
+from abebe.maze import deja_vu_system as deja_vu_logic
 from abebe.maze.maze_pygame_common import GAME_VIEW_H, GAME_VIEW_W, blit_game_view_upscaled
 from abebe.maze.pause_menu import run_pause_menu
 from abebe.maze.raycast_engine import DEFAULT_EYE_HEIGHT, NUM_RAYS, RaycastEngine, draw_floor_ceiling, pil_to_surface
@@ -82,8 +83,8 @@ HEXAGAZE_POST_ATTACK_WAIT = 4.0
 MAP = [
     ".........###...............",
     "##########P################",
-    "#.........................#",
-    "#.........................#",
+    "#........H................#",
+    "#.......HR................#",
     "#.........................#",
     "#.....................M...#",
     "#.........................#",
@@ -518,6 +519,11 @@ def get_floor_height(x, y, z_hint=None):
                 candidate = _runtime_stair_floor_height(obj, x, y)
             elif obj["type"] in {"wall", "box"}:
                 candidate = _runtime_tilted_box_top_height(obj, x, y)
+                if candidate is None:
+                    span = _runtime_box_vertical_span(obj, x, y)
+                    if span is not None:
+                        _bottom_z, top_z = span
+                        candidate = top_z
             if candidate is None:
                 continue
             if z_hint is not None and candidate > z_hint + RAMP_REACH_HEIGHT + 0.08:
@@ -1447,25 +1453,71 @@ def start_tutor_maze(root=None):
     statistics_window = StatisticsWindow(W, H, 0, stats, fonts, resource_path)
     next_action = None
 
-    deja_vu_active = False
-    deja_vu_started_at = 0.0
-    deja_vu_charge = DEJA_VU_MAX_CHARGE
-    deja_vu_recharge_available_at = 0.0
-    deja_vu_snapshot = None
-    deja_vu_ghost_trail = []
-    deja_vu_ghost_acc = 0.0
-    deja_vu_return_started_at = None
-    deja_vu_active_budget = 0.0
+    deja_vu_runtime = deja_vu_logic.build_deja_vu_state(DEJA_VU_MAX_CHARGE)
+    deja_vu_active = deja_vu_runtime["deja_vu_active"]
+    deja_vu_started_at = deja_vu_runtime["deja_vu_started_at"]
+    deja_vu_charge = deja_vu_runtime["deja_vu_charge"]
+    deja_vu_recharge_available_at = deja_vu_runtime["deja_vu_recharge_available_at"]
+    deja_vu_snapshot = deja_vu_runtime["deja_vu_snapshot"]
+    deja_vu_ghost_trail = deja_vu_runtime["deja_vu_ghost_trail"]
+    deja_vu_ghost_acc = deja_vu_runtime["deja_vu_ghost_acc"]
+    deja_vu_return_started_at = deja_vu_runtime["deja_vu_return_started_at"]
+    deja_vu_active_budget = deja_vu_runtime["deja_vu_active_budget"]
+    deja_vu_enemy_view_time = deja_vu_runtime["deja_vu_enemy_view_time"]
+    deja_vu_rewarded_enemies = deja_vu_runtime["deja_vu_rewarded_enemies"]
+
+    def sync_deja_vu_runtime_from_locals():
+        deja_vu_runtime["deja_vu_active"] = deja_vu_active
+        deja_vu_runtime["deja_vu_started_at"] = deja_vu_started_at
+        deja_vu_runtime["deja_vu_charge"] = deja_vu_charge
+        deja_vu_runtime["deja_vu_recharge_available_at"] = deja_vu_recharge_available_at
+        deja_vu_runtime["deja_vu_snapshot"] = deja_vu_snapshot
+        deja_vu_runtime["deja_vu_ghost_trail"] = deja_vu_ghost_trail
+        deja_vu_runtime["deja_vu_ghost_acc"] = deja_vu_ghost_acc
+        deja_vu_runtime["deja_vu_return_started_at"] = deja_vu_return_started_at
+        deja_vu_runtime["deja_vu_active_budget"] = deja_vu_active_budget
+        deja_vu_runtime["deja_vu_enemy_view_time"] = deja_vu_enemy_view_time
+        deja_vu_runtime["deja_vu_rewarded_enemies"] = deja_vu_rewarded_enemies
+
+    def sync_deja_vu_locals_from_runtime():
+        nonlocal deja_vu_active, deja_vu_started_at, deja_vu_charge, deja_vu_recharge_available_at
+        nonlocal deja_vu_snapshot, deja_vu_ghost_trail, deja_vu_ghost_acc, deja_vu_return_started_at
+        nonlocal deja_vu_active_budget, deja_vu_enemy_view_time, deja_vu_rewarded_enemies
+        deja_vu_active = deja_vu_runtime["deja_vu_active"]
+        deja_vu_started_at = deja_vu_runtime["deja_vu_started_at"]
+        deja_vu_charge = deja_vu_runtime["deja_vu_charge"]
+        deja_vu_recharge_available_at = deja_vu_runtime["deja_vu_recharge_available_at"]
+        deja_vu_snapshot = deja_vu_runtime["deja_vu_snapshot"]
+        deja_vu_ghost_trail = deja_vu_runtime["deja_vu_ghost_trail"]
+        deja_vu_ghost_acc = deja_vu_runtime["deja_vu_ghost_acc"]
+        deja_vu_return_started_at = deja_vu_runtime["deja_vu_return_started_at"]
+        deja_vu_active_budget = deja_vu_runtime["deja_vu_active_budget"]
+        deja_vu_enemy_view_time = deja_vu_runtime["deja_vu_enemy_view_time"]
+        deja_vu_rewarded_enemies = deja_vu_runtime["deja_vu_rewarded_enemies"]
 
     def deja_vu_available():
-        return (
-            not deja_vu_active
-            and not intro_active
-            and not elevator_active
-            and not stats_window_active
-            and not start_cutscene_active
-            and mannequin_restart_at is None
-            and deja_vu_charge >= DEJA_VU_MIN_ACTIVATION
+        sync_deja_vu_runtime_from_locals()
+        return deja_vu_logic.is_available(
+            deja_vu_runtime,
+            blocked=(
+                intro_active
+                or elevator_active
+                or stats_window_active
+                or start_cutscene_active
+                or mannequin_restart_at is not None
+            ),
+            min_activation=DEJA_VU_MIN_ACTIVATION,
+        )
+
+    def player_can_see_deja_enemy(enemy_x, enemy_y):
+        return deja_vu_logic.can_see_enemy_point(
+            player_x,
+            player_y,
+            player_angle,
+            enemy_x,
+            enemy_y,
+            wrap_angle,
+            has_line_of_sight,
         )
 
     def capture_deja_vu_snapshot():
@@ -1617,63 +1669,66 @@ def start_tutor_maze(root=None):
         if not deja_vu_available():
             return
         now_local = time.time()
-        deja_vu_snapshot = capture_deja_vu_snapshot()
-        deja_vu_active = True
-        deja_vu_started_at = now_local
-        deja_vu_active_budget = deja_vu_charge
-        deja_vu_ghost_trail = [{"x": player_x, "y": player_y, "spawned_at": now_local}]
-        deja_vu_ghost_acc = 0.0
-        deja_vu_return_started_at = None
+        sync_deja_vu_runtime_from_locals()
+        deja_vu_logic.activate(
+            deja_vu_runtime,
+            now_value=now_local,
+            snapshot=capture_deja_vu_snapshot(),
+            player_x=player_x,
+            player_y=player_y,
+        )
+        sync_deja_vu_locals_from_runtime()
 
     def finish_deja_vu():
         nonlocal deja_vu_active, deja_vu_snapshot, deja_vu_ghost_acc, deja_vu_return_started_at
-        nonlocal deja_vu_active_budget, deja_vu_charge, deja_vu_recharge_available_at
-        if deja_vu_snapshot is None:
-            deja_vu_active = False
+        nonlocal deja_vu_active_budget, deja_vu_charge, deja_vu_recharge_available_at, player_health
+        sync_deja_vu_runtime_from_locals()
+        result = deja_vu_logic.finish(
+            deja_vu_runtime,
+            now_value=time.time(),
+            max_charge=DEJA_VU_MAX_CHARGE,
+            recharge_delay=DEJA_VU_RECHARGE_DELAY,
+        )
+        sync_deja_vu_locals_from_runtime()
+        if result["snapshot"] is None:
             return
-        elapsed = max(0.0, time.time() - deja_vu_started_at)
-        deja_vu_charge = max(0.0, min(DEJA_VU_MAX_CHARGE, deja_vu_active_budget - elapsed))
-        deja_vu_recharge_available_at = time.time() + DEJA_VU_RECHARGE_DELAY
-        restore_deja_vu_snapshot(deja_vu_snapshot)
-        deja_vu_active = False
-        deja_vu_snapshot = None
-        deja_vu_ghost_acc = 0.0
-        deja_vu_active_budget = 0.0
-        deja_vu_return_started_at = time.time()
+        restore_deja_vu_snapshot(result["snapshot"])
+        if result["heal"] > 0 and player_health < PLAYER_MAX_HEALTH:
+            player_health = min(PLAYER_MAX_HEALTH, player_health + result["heal"])
 
     def update_deja_vu(delta_time):
         nonlocal deja_vu_ghost_acc, deja_vu_ghost_trail, deja_vu_charge
         now_local = time.time()
-        deja_vu_ghost_trail = [
-            point for point in deja_vu_ghost_trail
-            if now_local - point["spawned_at"] < DEJA_VU_GHOST_LIFETIME
-        ]
-        if not deja_vu_active and now_local >= deja_vu_recharge_available_at and deja_vu_charge < DEJA_VU_MAX_CHARGE:
-            fast_rate = DEJA_VU_FAST_CHARGE_CAP / DEJA_VU_FAST_CHARGE_TIME
-            slow_charge_amount = max(0.0, DEJA_VU_MAX_CHARGE - DEJA_VU_FAST_CHARGE_CAP)
-            slow_rate = slow_charge_amount / DEJA_VU_SLOW_CHARGE_TIME if slow_charge_amount > 0 else fast_rate
-            recharge_left = max(0.0, delta_time)
-
-            if deja_vu_charge < DEJA_VU_FAST_CHARGE_CAP and recharge_left > 0.0:
-                fast_missing = DEJA_VU_FAST_CHARGE_CAP - deja_vu_charge
-                fast_gain = min(fast_missing, recharge_left * fast_rate)
-                deja_vu_charge += fast_gain
-                recharge_left -= fast_gain / fast_rate
-
-            if deja_vu_charge >= DEJA_VU_FAST_CHARGE_CAP and recharge_left > 0.0:
-                deja_vu_charge = min(DEJA_VU_MAX_CHARGE, deja_vu_charge + recharge_left * slow_rate)
-        if not deja_vu_active:
-            return
-        deja_vu_ghost_acc += delta_time
-        if deja_vu_ghost_acc >= DEJA_VU_GHOST_INTERVAL:
-            deja_vu_ghost_acc = 0.0
-            if (
-                not deja_vu_ghost_trail
-                or math.hypot(player_x - deja_vu_ghost_trail[-1]["x"], player_y - deja_vu_ghost_trail[-1]["y"]) > 0.08
-            ):
-                deja_vu_ghost_trail.append({"x": player_x, "y": player_y, "spawned_at": now_local})
-        if now_local - deja_vu_started_at >= deja_vu_active_budget:
+        sync_deja_vu_runtime_from_locals()
+        deja_vu_logic.update_return_fade(deja_vu_runtime, now_value=now_local, return_fade=DEJA_VU_RETURN_FADE)
+        if deja_vu_active:
+            visible_enemy_ids = set()
+            if mannequin_alive and mannequin_x is not None and mannequin_y is not None and player_can_see_mannequin():
+                visible_enemy_ids.add(("mannequin", 0))
+            for orb_index, orb in enumerate(orbs):
+                if orb["health"] > 0 and player_can_see_deja_enemy(orb["x"], orb["y"]):
+                    visible_enemy_ids.add(("orb", orb_index))
+            for sentry_index, sentry in enumerate(sentries):
+                if sentry["health"] > 0 and player_can_see_deja_enemy(sentry["x"], sentry["y"]):
+                    visible_enemy_ids.add(("sentry", sentry_index))
+            deja_vu_logic.update_enemy_rewards(deja_vu_runtime, delta_time=delta_time, visible_enemy_ids=visible_enemy_ids)
+        if deja_vu_logic.update_runtime(
+            deja_vu_runtime,
+            now_value=now_local,
+            delta_time=delta_time,
+            max_charge=DEJA_VU_MAX_CHARGE,
+            fast_charge_cap=DEJA_VU_FAST_CHARGE_CAP,
+            fast_charge_time=DEJA_VU_FAST_CHARGE_TIME,
+            slow_charge_time=DEJA_VU_SLOW_CHARGE_TIME,
+            ghost_lifetime=DEJA_VU_GHOST_LIFETIME,
+            ghost_interval=DEJA_VU_GHOST_INTERVAL,
+            player_x=player_x,
+            player_y=player_y,
+        ):
+            sync_deja_vu_locals_from_runtime()
             finish_deja_vu()
+            return
+        sync_deja_vu_locals_from_runtime()
 
     def get_deja_vu_visual_mix(now_value):
         if deja_vu_active:

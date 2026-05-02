@@ -7,11 +7,14 @@ from abebe.core.background_music import play_overlay_music, play_sound_effect, s
 from abebe.entities import bomb as bomb_logic
 from abebe.entities import hexagaze as hexagaze_logic
 from abebe.entities import mannequin as mannequin_logic
+from abebe.entities import rob as rob_logic
 from abebe.entities.bomb import load_gif_frames
+from abebe.maze import deja_vu_system as deja_vu_logic
 from abebe.maze import pause_menu as pause_menu_ui
 from abebe.maze.opengl_maze_core import (
     PLAYER_EYE_HEIGHT,
     TARGET_FPS,
+    acquire_opengl_display,
     begin_overlay,
     copy_framebuffer_to_texture,
     create_empty_texture,
@@ -29,9 +32,40 @@ from abebe.maze.opengl_maze_core import (
     draw_overlay_texture,
     end_overlay,
     fog_shade,
+    release_opengl_display,
     require_opengl_dependencies,
     wrap_angle,
 )
+from abebe.maze.runtime_effects import (
+    get_shot_hit_info as runtime_get_shot_hit_info,
+    render_bullet_marks as runtime_render_bullet_marks,
+    render_impact_particles as runtime_render_impact_particles,
+    sample_image_color,
+    spawn_bullet_mark as runtime_spawn_bullet_mark,
+    spawn_impact_particles as runtime_spawn_impact_particles,
+    update_bullet_marks as runtime_update_bullet_marks,
+    update_impact_particles as runtime_update_impact_particles,
+)
+from abebe.maze.runtime_overlay import (
+    clamp01 as runtime_clamp01,
+    draw_rect as runtime_draw_rect,
+    draw_text as runtime_draw_text,
+    ease_out_cubic as runtime_ease_out_cubic,
+    make_font as runtime_make_font,
+    run_pause_menu_opengl as runtime_run_pause_menu_opengl,
+)
+from abebe.maze.runtime_world import (
+    draw_runtime_floor_and_ceiling as runtime_draw_runtime_floor_and_ceiling,
+    get_player_spawn as runtime_get_player_spawn,
+    has_line_of_sight as runtime_has_line_of_sight,
+    iter_runtime_stair_links as runtime_iter_runtime_stair_links,
+    iter_runtime_stairs as runtime_iter_runtime_stairs,
+    iter_runtime_walls as runtime_iter_runtime_walls,
+    render_world_sprites as runtime_render_world_sprites,
+)
+from abebe.maze.opengl_human_model import collect_human_markers, draw_human_model
+from abebe.maze.opengl_rob_talk_model import draw_animated_human_model, draw_rob_talk_model, get_animated_human_duration
+from abebe.maze.opengl_player_body import draw_player_body
 from PIL import Image, ImageDraw, ImageFont
 from abebe.maze.tutor_maze import (
     DEJA_VU_FAST_CHARGE_CAP,
@@ -81,6 +115,7 @@ from abebe.maze.tutor_maze import (
     resource_path,
 )
 from abebe.core.user_settings import (
+    get_flash_enabled,
     get_bullet_marks_enabled,
     get_game_view_size,
     get_impact_particles_enabled,
@@ -97,6 +132,7 @@ try:
     from OpenGL.GL import (
         GL_BLEND,
         GL_COLOR_BUFFER_BIT,
+        GL_COMPILE,
         GL_DEPTH_BUFFER_BIT,
         GL_DEPTH_TEST,
         GL_MODELVIEW,
@@ -104,18 +140,27 @@ try:
         GL_PROJECTION,
         GL_QUADS,
         GL_SRC_ALPHA,
+        GL_TEXTURE_2D,
         glBegin,
         glClear,
         glClearColor,
         glColor4f,
         glBlendFunc,
+        glBindTexture,
         glDisable,
+        glCallList,
+        glDeleteLists,
         glEnd,
         glEnable,
+        glEndList,
+        glGenLists,
         glLoadIdentity,
         glMatrixMode,
+        glNewList,
         glRotatef,
+        glTexCoord2f,
         glTranslatef,
+        glVertex2f,
         glVertex3f,
         glViewport,
     )
@@ -125,6 +170,7 @@ except Exception:  # pragma: no cover
 
 
 CUSTOM_RUNTIME_GEOMETRY = None
+_TEXT_TEXTURE_CACHE = {}
 
 
 def _clamp01(value):
@@ -149,22 +195,72 @@ def _make_font(size, bold=False):
     return ImageFont.load_default()
 
 
-def _draw_text(font, text, color, x, y):
+def get_cached_text_texture(font, text, color):
+    key = (id(font), text, tuple(color))
+    cached = _TEXT_TEXTURE_CACHE.get(key)
+    if cached is not None:
+        return cached
     bbox = font.getbbox(text)
     text_w = max(1, bbox[2] - bbox[0] + 2)
     text_h = max(1, bbox[3] - bbox[1] + 2)
     image = Image.new("RGBA", (text_w, text_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
     draw.text((1 - bbox[0], 1 - bbox[1]), text, font=font, fill=tuple(color))
-    texture_id, _w, _h = create_texture_from_pil(image)
+    cached = create_texture_from_pil(image)
+    if len(_TEXT_TEXTURE_CACHE) > 256:
+        oldest_key = next(iter(_TEXT_TEXTURE_CACHE))
+        oldest_texture_id, _old_w, _old_h = _TEXT_TEXTURE_CACHE.pop(oldest_key)
+        delete_texture(oldest_texture_id)
+    _TEXT_TEXTURE_CACHE[key] = cached
+    return cached
+
+
+def clear_cached_text_textures():
+    for texture_id, _w, _h in _TEXT_TEXTURE_CACHE.values():
+        delete_texture(texture_id)
+    _TEXT_TEXTURE_CACHE.clear()
+
+
+def _draw_text(font, text, color, x, y):
+    texture_id, text_w, text_h = get_cached_text_texture(font, text, color)
     draw_overlay_texture(texture_id, x, y, text_w, text_h)
-    delete_texture(texture_id)
+    return text_w, text_h
+
+
+def _draw_text_perspective(font, text, color, x, y, depth=4, shrink=0.08, drift_x=-12, drift_y=-6):
+    texture_id, text_w, text_h = get_cached_text_texture(font, text, color)
+    base_tint = (color[0] / 255.0, color[1] / 255.0, color[2] / 255.0)
+    for layer in range(depth, 0, -1):
+        t = layer / max(1, depth)
+        scale = max(0.6, 1.0 - shrink * layer)
+        draw_w = max(1, int(text_w * scale))
+        draw_h = max(1, int(text_h * scale))
+        layer_x = x + int(drift_x * t)
+        layer_y = y + int(drift_y * t)
+        alpha = 0.08 + 0.08 * (1.0 - t)
+        draw_overlay_texture(texture_id, layer_x, layer_y, draw_w, draw_h, tint=(0.0, 0.28 + 0.18 * (1.0 - t), 0.0), alpha=alpha)
+    draw_overlay_texture(texture_id, x, y, text_w, text_h, tint=base_tint, alpha=1.0)
     return text_w, text_h
 
 
 def _draw_rect(texture_id, x, y, width, height, color, alpha=1.0):
     tint = (color[0] / 255.0, color[1] / 255.0, color[2] / 255.0)
     draw_overlay_texture(texture_id, x, y, width, height, tint=tint, alpha=alpha)
+
+
+def _draw_overlay_texture_quad(texture_id, points, tint=(1.0, 1.0, 1.0), alpha=1.0):
+    glBindTexture(GL_TEXTURE_2D, texture_id)
+    glColor4f(tint[0], tint[1], tint[2], alpha)
+    glBegin(GL_QUADS)
+    glTexCoord2f(0.0, 1.0)
+    glVertex2f(points[0][0], points[0][1])
+    glTexCoord2f(1.0, 1.0)
+    glVertex2f(points[1][0], points[1][1])
+    glTexCoord2f(1.0, 0.0)
+    glVertex2f(points[2][0], points[2][1])
+    glTexCoord2f(0.0, 0.0)
+    glVertex2f(points[3][0], points[3][1])
+    glEnd()
 
 
 def _draw_billboard_sprite(sprite_batch, player_x, player_y, x, y, bottom_z, pil_image, height_world, alpha=1.0, tint=(1.0, 1.0, 1.0)):
@@ -519,6 +615,107 @@ def iter_runtime_stair_links():
         yield link
 
 
+def build_runtime_display_lists(runtime_geometry, wall_texture_id):
+    if runtime_geometry is None:
+        return {}
+
+    display_lists = {}
+
+    floor_list = glGenLists(1)
+    glNewList(floor_list, GL_COMPILE)
+    for surface in runtime_geometry.get("floor_surfaces", []):
+        cell_x = surface["x"]
+        cell_y = surface["y"]
+        floor_z = surface["z"]
+        draw_floor_cell_fill(
+            cell_x,
+            cell_y,
+            floor_z,
+            color=(0.16 + floor_z * 0.10, 0.16 + floor_z * 0.03, 0.18),
+            alpha=1.0,
+        )
+    for surface in runtime_geometry.get("ceiling_surfaces", []):
+        cell_x = surface["x"]
+        cell_y = surface["y"]
+        ceiling_z = surface["z"]
+        draw_floor_cell_fill(
+            cell_x,
+            cell_y,
+            ceiling_z,
+            color=(0.08, 0.08, 0.10),
+            alpha=0.95,
+            lift=-0.006,
+        )
+    glEndList()
+    display_lists["floor"] = floor_list
+
+    world_list = glGenLists(1)
+    glNewList(world_list, GL_COMPILE)
+    for wall in runtime_iter_runtime_walls(runtime_geometry, MAP, has_upper_wall):
+        draw_box(
+            wall["x"],
+            wall["base_z"],
+            wall["y"],
+            1.0,
+            wall["height"],
+            default_cell_color(wall["cell"]),
+            texture_id=wall_texture_id,
+            shade=1.0,
+            scale_x=wall.get("scale_x", 1.0),
+            scale_y=wall.get("scale_y", 1.0),
+            scale_z=1.0,
+            offset_x=wall.get("offset_x", 0.0),
+            offset_y=wall.get("offset_y", 0.0),
+            offset_z=wall.get("offset_z", 0.0),
+            rotation_x=wall.get("rotation_x", 0.0),
+            rotation_y=wall.get("rotation_y", 0.0),
+            rotation_z=wall.get("rotation", 0.0),
+        )
+    for stair in runtime_iter_runtime_stairs(runtime_geometry):
+        draw_ramp(
+            stair["x"],
+            stair["base_z"],
+            stair["y"],
+            1.0,
+            stair["height"],
+            stair["rotation"],
+            default_cell_color("I"),
+            texture_id=wall_texture_id,
+            shade=1.0,
+            scale_x=stair.get("scale_x", 1.0),
+            scale_y=stair.get("scale_y", 1.0),
+            scale_z=1.0,
+            offset_x=stair.get("offset_x", 0.0),
+            offset_y=stair.get("offset_y", 0.0),
+            offset_z=stair.get("offset_z", 0.0),
+            rotation_x=stair.get("rotation_x", 0.0),
+            rotation_y=stair.get("rotation_y", 0.0),
+        )
+    for link in runtime_iter_runtime_stair_links(runtime_geometry):
+        draw_bridge_plane(
+            link["start_x"],
+            link["start_z"],
+            link["start_y"],
+            link["end_x"],
+            link["end_z"],
+            link["end_y"],
+            link.get("width", 0.34),
+            default_cell_color("I"),
+            texture_id=wall_texture_id,
+            shade=1.0,
+        )
+    glEndList()
+    display_lists["world"] = world_list
+
+    return display_lists
+
+
+def delete_runtime_display_lists(display_lists):
+    for list_id in display_lists.values():
+        if list_id:
+            glDeleteLists(int(list_id), 1)
+
+
 def render_world_sprites(state, player_x, player_y, player_angle, textures, bomb_world_frame_index, is_render_point_visible):
     sprite_batch = []
 
@@ -690,14 +887,15 @@ def start_tutor_maze_opengl(root=None):
     require_opengl_dependencies()
 
     custom_runtime_active = CUSTOM_RUNTIME_GEOMETRY is not None
-    player_spawn_x, player_spawn_y = get_player_spawn()
+    player_spawn_x, player_spawn_y = runtime_get_player_spawn(CUSTOM_RUNTIME_GEOMETRY, MAP)
     player_start_cutscene_offset = 0.0 if custom_runtime_active else 2.0
     player_x = player_spawn_x - player_start_cutscene_offset
     player_y = player_spawn_y
     player_z = get_floor_height(player_x, player_y)
     player_angle = 0.0
     player_pitch = 0.0
-    PITCH_LIMIT = math.radians(10.0)
+    PITCH_LIMIT_DOWN = math.radians(80.0)
+    PITCH_LIMIT_UP = math.radians(25.0)
     PITCH_SENSITIVITY = MOUSE_SENSITIVITY * 0.35
     bob_strength = get_view_bob()
     impact_particles_enabled = get_impact_particles_enabled()
@@ -718,10 +916,7 @@ def start_tutor_maze_opengl(root=None):
     GROUND_SNAP_DISTANCE = 0.04
     JUMP_CLIMB_HEIGHT = 0.62
 
-    pygame.init()
-    info = pygame.display.Info()
-    width, height = info.current_w, info.current_h
-    screen = pygame.display.set_mode((width, height), pygame.DOUBLEBUF | pygame.OPENGL | pygame.FULLSCREEN)
+    screen, width, height = acquire_opengl_display()
     clock = pygame.time.Clock()
     render_width, render_height = get_game_view_size()
     render_width = max(64, min(render_width, width))
@@ -741,15 +936,35 @@ def start_tutor_maze_opengl(root=None):
     pygame.mouse.set_visible(False)
     pygame.mouse.get_rel()
 
-    font_title = _make_font(14, bold=True)
-    font_hud = _make_font(16)
-    font_hud_big = _make_font(18)
-    font_clock = _make_font(13, bold=True)
-    font_slot = _make_font(11)
-    font_task = _make_font(18)
+    font_title = runtime_make_font(14, bold=True)
+    font_hud = runtime_make_font(16)
+    font_hud_big = runtime_make_font(18)
+    font_clock = runtime_make_font(13, bold=True)
+    font_slot = runtime_make_font(11)
+    font_task = runtime_make_font(18)
+    font_intro = runtime_make_font(42)
+    font_stats = runtime_make_font(24)
+    font_stats_small = runtime_make_font(18)
     hud_start_time = time.time()
+    flash_enabled = get_flash_enabled()
+
+    intro_active = True
+    intro_text = "CASE 0.0.0 /// TRAINING_SIM"
+    intro_index = 0
+    intro_start = time.time()
+    intro_duration = 11.0
+    pixel_size = 28
+    pixel_grid = []
+    for grid_x in range(0, width, pixel_size):
+        for grid_y in range(0, height, pixel_size):
+            pixel_grid.append([grid_x, grid_y, True])
+    random.shuffle(pixel_grid)
+    pixel_grid_full = [(point[0], point[1]) for point in pixel_grid]
+    pixel_grid = pixel_grid[:1200]
+    intro_fade_started = False
 
     texture_cache = {}
+    hand_texture_cache = {}
 
     def get_cached_texture(pil_image):
         key = id(pil_image)
@@ -757,6 +972,20 @@ def start_tutor_maze_opengl(root=None):
         if cached is None:
             cached = create_texture_from_pil(pil_image)
             texture_cache[key] = cached
+        return cached
+
+    def get_cached_hand_texture(pil_frame, item_id):
+        key = (item_id, id(pil_frame))
+        cached = hand_texture_cache.get(key)
+        if cached is not None:
+            return cached
+        hand_image = build_hand_image(pil_frame, item_id)
+        cached = create_texture_from_pil(hand_image)
+        if len(hand_texture_cache) > 32:
+            oldest_key = next(iter(hand_texture_cache))
+            old_texture_id, _old_w, _old_h = hand_texture_cache.pop(oldest_key)
+            delete_texture(old_texture_id)
+        hand_texture_cache[key] = cached
         return cached
 
     white_texture_id, _, _ = create_texture_from_pil(Image.new("RGBA", (1, 1), (255, 255, 255, 255)))
@@ -776,6 +1005,10 @@ def start_tutor_maze_opengl(root=None):
         for texture_id, _w, _h in texture_cache.values():
             delete_texture(texture_id)
         texture_cache.clear()
+        clear_cached_text_textures()
+        for texture_id, _w, _h in hand_texture_cache.values():
+            delete_texture(texture_id)
+        hand_texture_cache.clear()
         delete_texture(white_texture_id)
         delete_texture(deja_screen_texture[0])
         delete_texture(scene_texture[0])
@@ -823,10 +1056,27 @@ def start_tutor_maze_opengl(root=None):
     hud_h = int(48 * HUD_SCALE_Y)
     hud_texture = create_texture_from_pil(hud_raw.resize((hud_w, hud_h), Image.NEAREST))
     wall_texture_id, _, _ = create_texture_from_pil(wall_tex_raw.resize((64, 64), Image.NEAREST))
+    runtime_display_lists = build_runtime_display_lists(CUSTOM_RUNTIME_GEOMETRY, wall_texture_id)
     task_stub_small = task_stub_src.resize((TASK_ICON_SIZE, TASK_ICON_SIZE), Image.NEAREST)
     gunitem_small = gunitem_raw.resize((40, 40), Image.NEAREST)
     bomb_icon_small = bomb_assets["bomb_icon_raw"].resize((40, 40), Image.NEAREST)
     activator_icon_small = activator_icon_raw.resize((40, 40), Image.NEAREST)
+    stats_icon_raw = Image.open(resource_path("data/unknown.png")).convert("RGBA")
+    door_left_tex = Image.open(resource_path("data/Lelevatordoor.png")).convert("RGBA")
+    door_right_tex = Image.open(resource_path("data/Relevatordoor.png")).convert("RGBA")
+    DOOR_CLOSE_STEPS = 12
+    DOOR_PIL_H = 64
+    DOOR_PIL_W_MIN = 48
+    DOOR_PIL_W_MAX = DOOR_PIL_H
+    door_left_frames = []
+    door_right_frames = []
+    for i in range(DOOR_CLOSE_STEPS):
+        close_t = i / max(1, DOOR_CLOSE_STEPS - 1)
+        thin_t = _clamp01((close_t - 0.65) / 0.35)
+        door_w = int(DOOR_PIL_W_MAX * (1.0 - thin_t) + DOOR_PIL_W_MIN * thin_t)
+        door_w = max(1, door_w)
+        door_left_frames.append(door_left_tex.resize((door_w, DOOR_PIL_H), Image.NEAREST))
+        door_right_frames.append(door_right_tex.resize((door_w, DOOR_PIL_H), Image.NEAREST))
 
     hexagaze_assets = hexagaze_logic.load_hexagaze_assets(resource_path)
     orb_cycle = ["red", "violet", "yellow", "green"]
@@ -865,6 +1115,8 @@ def start_tutor_maze_opengl(root=None):
                     gun_pickups.append((x + 0.5, y + 0.5))
 
     bomb_pickups = bomb_logic.collect_bomb_pickups(CUSTOM_RUNTIME_GEOMETRY or MAP)
+    human_markers = collect_human_markers(MAP)
+    rob_state = rob_logic.create_rob_state(MAP)
     lift_tiles = {(x, y) for y, row in enumerate(MAP) for x, c in enumerate(row) if c == "N"}
     orbs = [
         {"x": 5.5, "y": 5.5, "color": "yellow", "health": 20, "max_health": 20},
@@ -888,6 +1140,8 @@ def start_tutor_maze_opengl(root=None):
         "active_explosions": [],
         "gun_pickups": gun_pickups,
         "bomb_pickups": bomb_pickups,
+        "human_markers": human_markers,
+        "rob_state": rob_state,
         "orbs": orbs,
         "sentries": sentries,
         "sentry_projectiles": sentry_projectiles,
@@ -897,32 +1151,63 @@ def start_tutor_maze_opengl(root=None):
         "mannequin_restart_at": None,
         "next_punch_time": 0.0,
         "target_cell": None,
-        "deja_vu_active": False,
-        "deja_vu_started_at": 0.0,
-        "deja_vu_charge": DEJA_VU_MAX_CHARGE,
-        "deja_vu_recharge_available_at": 0.0,
-        "deja_vu_snapshot": None,
-        "deja_vu_ghost_trail": [],
-        "deja_vu_ghost_acc": 0.0,
-        "deja_vu_return_started_at": None,
-        "deja_vu_active_budget": 0.0,
+        **deja_vu_logic.build_deja_vu_state(DEJA_VU_MAX_CHARGE),
         "lights": lights,
         "light_states": light_states,
         "light_timers": light_timers,
         "start_cutscene_active": not custom_runtime_active,
         "start_cutscene_started": False,
         "start_cutscene_start_time": 0.0,
+        "start_cutscene_open_t": 0.0,
+        "start_cutscene_close_t": 0.0,
         "elevator_active": False,
         "elevator_start_time": 0.0,
         "elevator_from_angle": 0.0,
         "elevator_target_angle": 0.0,
+        "elevator_close_t": 0.0,
+        "elevator_enter_time": 0.0,
         "elevator_transition_to_testing": False,
+        "stats_window_active": False,
+        "dev_debug_window_active": False,
+        "stats_animation_start": 0.0,
+        "stats_counting_active": False,
+        "stats_count_start": 0.0,
+        "stats_can_skip": False,
+        "stats_completed": False,
+        "stats_flash_active": False,
+        "stats_flash_start": 0.0,
+        "stats_icon_active": False,
+        "stats_icon_pulse_time": 0.0,
+        "stats_progress_bar_current": 0.0,
+        "stats_window_y": 0.0,
+        "stats_shake_offset": 0.0,
+        "stats_float_offset_x": 0.0,
+        "stats_float_offset_y": 0.0,
+        "stats_float_time": 0.0,
         "enemies_killed": 0,
+        "flashback_last_kill_count": 0,
         "total_shots_fired": 0,
         "total_shots_hit": 0,
         "impact_particles": [],
         "bullet_marks": [],
     }
+
+    start_door_anchor_x = player_x + math.cos(player_angle) * 0.62
+    start_door_anchor_y = player_y + math.sin(player_angle) * 0.62
+    ELEV_ROT_DUR = 1.0
+    ELEV_DOOR_CLOSE_DUR = 2.0
+    ELEV_DOOR_HOLD_DUR = 2.0
+    ELEV_SHAKE_DUR = 2.0
+    ELEV_TOTAL_DUR = ELEV_DOOR_CLOSE_DUR + ELEV_DOOR_HOLD_DUR + ELEV_SHAKE_DUR
+    START_DOOR_WAIT_DUR = 3.0
+    START_DOOR_OPEN_DUR = 0.55
+    START_MOVE_DUR = 0.7
+    START_DOOR_CLOSE_DUR = 0.45
+    stats_count_duration = 2.0
+    stats_flash_duration = 0.3
+    stats_icon_base_size = 48
+    stats_icon_max_size = 72
+    stats_progress_bar_target = 67.0
 
     gunshoot_animating = False
     gunshoot_frame_index = 0
@@ -949,6 +1234,7 @@ def start_tutor_maze_opengl(root=None):
     next_action = None
     fps_display = 0
     fps_timer = 0.0
+    caption_timer = 0.0
     show_fps_overlay = get_show_fps()
     textures = {
         "texture_cache": get_cached_texture,
@@ -969,6 +1255,16 @@ def start_tutor_maze_opengl(root=None):
     def restart_pending():
         return state["mannequin_restart_at"] is not None or state["player_restart_at"] is not None
 
+    def rob_dialog_active():
+        return state["rob_state"].get("active") and state["rob_state"].get("dialog_active", False)
+
+    def rob_interaction_locked(now_value):
+        if not state["rob_state"].get("active"):
+            return False
+        if state["rob_state"].get("dialog_active", False):
+            return True
+        return now_value < state["rob_state"].get("reaction_hold_until", 0.0)
+
     def is_render_point_visible(world_x, world_y, near_dist=1.3, back_margin=-0.18):
         if not rear_world_culling_enabled:
             return True
@@ -981,12 +1277,18 @@ def start_tutor_maze_opengl(root=None):
         return facing >= back_margin
 
     def trigger_player_death(now_value):
-        if state["player_restart_at"] is None:
-            state["player_restart_at"] = now_value + 0.35
+        if state["player_restart_at"] is not None or state["deja_vu_death_return_pending"]:
+            return
+        if state["deja_vu_active"] and state["deja_vu_snapshot"] is not None:
+            deja_vu_logic.trigger_death_break(state, now_value=now_value)
+            return
+        state["player_restart_at"] = now_value + 0.35
 
     def damage_player(amount, now_value):
         if state["player_restart_at"] is not None:
             return
+        if state["flashback_active"]:
+            amount = max(0.0, amount - deja_vu_logic.FLASHBACK_DAMAGE_SHIELD)
         state["player_health"] = max(0, state["player_health"] - amount)
         if state["player_health"] <= 0:
             trigger_player_death(now_value)
@@ -1127,6 +1429,36 @@ def start_tutor_maze_opengl(root=None):
                     "bounce": random.uniform(0.08, 0.26),
                 }
             )
+
+    def spawn_player_break_effect():
+        base_x = player_x + math.cos(player_angle) * 0.24
+        base_y = player_y + math.sin(player_angle) * 0.24
+        base_z = player_z + PLAYER_EYE_HEIGHT * 0.58
+        for color in ((1.0, 0.30, 0.24), (0.22, 0.72, 1.0), (0.95, 0.98, 1.0)):
+            runtime_spawn_impact_particles(
+                state,
+                impact_particles_enabled,
+                base_x + random.uniform(-0.05, 0.05),
+                base_y + random.uniform(-0.05, 0.05),
+                base_z + random.uniform(-0.07, 0.04),
+                color,
+                count=11,
+                speed=1.25,
+            )
+
+    def start_break_sequence_from_debug(now_value):
+        state["deja_vu_break_level"] = deja_vu_logic.DEJA_VU_BREAK_MAX_LEVEL
+        state["deja_vu_blackout_started_at"] = None
+        state["deja_vu_blackout_until"] = 0.0
+        state["deja_vu_death_return_pending"] = False
+        state["deja_vu_critical_freeze_until"] = now_value + deja_vu_logic.DEJA_VU_CRITICAL_FREEZE_DURATION
+        state["deja_vu_critical_break_times"] = [
+            now_value + 0.25,
+            now_value + 0.95,
+            now_value + 1.55,
+        ]
+        state["deja_vu_critical_break_index"] = 0
+        state["flashback_pending"] = True
 
     def spawn_bullet_mark(hit_type, x, y, z):
         if not bullet_marks_enabled:
@@ -1419,21 +1751,31 @@ def start_tutor_maze_opengl(root=None):
         gunshoot_animating = True
         gunshoot_frame_index = 0
         shoot_acc = 0.0
-        shot_hit = get_shot_hit_info()
+        shot_hit = runtime_get_shot_hit_info(
+            get_camera_origin,
+            get_view_ray,
+            state,
+            textures,
+            player_x,
+            player_y,
+            get_floor_height,
+            get_ceiling_height,
+            is_wall,
+        )
         if shot_hit is None:
             return
 
         if shot_hit["type"] == "mannequin":
             if mannequin_state["alive"] and mannequin_state["mode"] == "observe" and player_can_see_mannequin():
                 damage_mannequin_from_player_attack(1, register_shot_hit=True)
-                spawn_impact_particles(shot_hit["x"], shot_hit["y"], shot_hit["z"], shot_hit["color"], count=10)
+                runtime_spawn_impact_particles(state, impact_particles_enabled, shot_hit["x"], shot_hit["y"], shot_hit["z"], shot_hit["color"], count=10)
             return
 
         if shot_hit["type"] == "orb":
             orb = shot_hit["entity"]
             orb["health"] -= 10
             state["total_shots_hit"] += 1
-            spawn_impact_particles(shot_hit["x"], shot_hit["y"], shot_hit["z"], shot_hit["color"], count=9)
+            runtime_spawn_impact_particles(state, impact_particles_enabled, shot_hit["x"], shot_hit["y"], shot_hit["z"], shot_hit["color"], count=9)
             if orb["health"] <= 0:
                 state["enemies_killed"] += 1
             return
@@ -1442,7 +1784,7 @@ def start_tutor_maze_opengl(root=None):
             sentry = shot_hit["entity"]
             sentry["health"] -= 1
             state["total_shots_hit"] += 1
-            spawn_impact_particles(shot_hit["x"], shot_hit["y"], shot_hit["z"], shot_hit["color"], count=10)
+            runtime_spawn_impact_particles(state, impact_particles_enabled, shot_hit["x"], shot_hit["y"], shot_hit["z"], shot_hit["color"], count=10)
             if sentry["health"] <= 0:
                 sentry["health"] = 0
                 sentry["burst_shots_left"] = 0
@@ -1451,18 +1793,18 @@ def start_tutor_maze_opengl(root=None):
 
         if shot_hit["type"] == "wall":
             hit_color = sample_image_color(wall_tex_raw, shot_hit["u"], shot_hit["v"])
-            spawn_impact_particles(shot_hit["x"], shot_hit["y"], shot_hit["z"], hit_color, count=8, speed=0.8)
-            spawn_bullet_mark("wall", shot_hit["x"], shot_hit["y"], shot_hit["z"])
+            runtime_spawn_impact_particles(state, impact_particles_enabled, shot_hit["x"], shot_hit["y"], shot_hit["z"], hit_color, count=8, speed=0.8)
+            runtime_spawn_bullet_mark(state, bullet_marks_enabled, "wall", shot_hit["x"], shot_hit["y"], shot_hit["z"])
             return
 
         if shot_hit["type"] == "floor":
-            spawn_impact_particles(shot_hit["x"], shot_hit["y"], shot_hit["z"], shot_hit["color"], count=7, speed=0.72)
-            spawn_bullet_mark("floor", shot_hit["x"], shot_hit["y"], shot_hit["z"])
+            runtime_spawn_impact_particles(state, impact_particles_enabled, shot_hit["x"], shot_hit["y"], shot_hit["z"], shot_hit["color"], count=7, speed=0.72)
+            runtime_spawn_bullet_mark(state, bullet_marks_enabled, "floor", shot_hit["x"], shot_hit["y"], shot_hit["z"])
             return
 
         if shot_hit["type"] == "ceiling":
-            spawn_impact_particles(shot_hit["x"], shot_hit["y"], shot_hit["z"], shot_hit["color"], count=7, speed=0.72)
-            spawn_bullet_mark("ceiling", shot_hit["x"], shot_hit["y"], shot_hit["z"])
+            runtime_spawn_impact_particles(state, impact_particles_enabled, shot_hit["x"], shot_hit["y"], shot_hit["z"], shot_hit["color"], count=7, speed=0.72)
+            runtime_spawn_bullet_mark(state, bullet_marks_enabled, "ceiling", shot_hit["x"], shot_hit["y"], shot_hit["z"])
 
     def start_reload():
         nonlocal reload_anim_index, reload_anim_active, reload_acc
@@ -1509,13 +1851,47 @@ def start_tutor_maze_opengl(root=None):
             trigger_activator()
 
     def deja_vu_available():
-        return (
-            not state["deja_vu_active"]
-            and not state["start_cutscene_active"]
-            and not state["elevator_active"]
-            and not restart_pending()
-            and state["deja_vu_charge"] >= DEJA_VU_MIN_ACTIVATION
+        return deja_vu_logic.is_available(
+            state,
+            blocked=(
+                state["start_cutscene_active"]
+                or state["elevator_active"]
+                or restart_pending()
+                or state["deja_vu_death_return_pending"]
+                or deja_vu_logic.deja_vu_locked(state)
+                or deja_vu_logic.critical_freeze_active(state, now_value=time.time())
+            ),
+            min_activation=DEJA_VU_MIN_ACTIVATION,
         )
+
+    def player_can_see_enemy_point(enemy_x, enemy_y):
+        return deja_vu_logic.can_see_enemy_point(
+            player_x,
+            player_y,
+            player_angle,
+            enemy_x,
+            enemy_y,
+            wrap_angle,
+            has_line_of_sight,
+        )
+
+    def update_deja_vu_enemy_rewards(delta_time):
+        visible_enemy_ids = set()
+        if mannequin_state["alive"] and mannequin_state["x"] is not None and mannequin_state["y"] is not None and player_can_see_mannequin():
+            visible_enemy_ids.add(("mannequin", 0))
+
+        for orb_index, orb in enumerate(state["orbs"]):
+            if orb["health"] <= 0:
+                continue
+            if player_can_see_enemy_point(orb["x"], orb["y"]):
+                visible_enemy_ids.add(("orb", orb_index))
+
+        for sentry_index, sentry in enumerate(state["sentries"]):
+            if sentry["health"] <= 0:
+                continue
+            if player_can_see_enemy_point(sentry["x"], sentry["y"]):
+                visible_enemy_ids.add(("sentry", sentry_index))
+        deja_vu_logic.update_enemy_rewards(state, delta_time=delta_time, visible_enemy_ids=visible_enemy_ids)
 
     def capture_deja_vu_snapshot():
         return {
@@ -1544,6 +1920,7 @@ def start_tutor_maze_opengl(root=None):
             "light_states": dict(state["light_states"]),
             "light_timers": dict(state["light_timers"]),
             "mannequin_state": copy.deepcopy(mannequin_state),
+            "rob_state": copy.deepcopy(state["rob_state"]),
             "total_shots_fired": state["total_shots_fired"],
             "total_shots_hit": state["total_shots_hit"],
             "enemies_killed": state["enemies_killed"],
@@ -1578,6 +1955,7 @@ def start_tutor_maze_opengl(root=None):
         state["light_timers"] = dict(snapshot["light_timers"])
         mannequin_state.clear()
         mannequin_state.update(copy.deepcopy(snapshot["mannequin_state"]))
+        state["rob_state"] = copy.deepcopy(snapshot.get("rob_state", state["rob_state"]))
         state["total_shots_fired"] = snapshot["total_shots_fired"]
         state["total_shots_hit"] = snapshot["total_shots_hit"]
         state["enemies_killed"] = snapshot["enemies_killed"]
@@ -1586,59 +1964,49 @@ def start_tutor_maze_opengl(root=None):
         if not deja_vu_available():
             return
         now_local = time.time()
-        state["deja_vu_snapshot"] = capture_deja_vu_snapshot()
-        state["deja_vu_active"] = True
-        state["deja_vu_started_at"] = now_local
-        state["deja_vu_active_budget"] = state["deja_vu_charge"]
-        state["deja_vu_ghost_trail"] = [{"x": player_x, "y": player_y, "spawned_at": now_local}]
-        state["deja_vu_ghost_acc"] = 0.0
-        state["deja_vu_return_started_at"] = None
+        deja_vu_logic.activate(
+            state,
+            now_value=now_local,
+            snapshot=capture_deja_vu_snapshot(),
+            player_x=player_x,
+            player_y=player_y,
+        )
 
-    def finish_deja_vu():
-        if state["deja_vu_snapshot"] is None:
-            state["deja_vu_active"] = False
+    def finish_deja_vu(now_value=None):
+        now_local = time.time() if now_value is None else now_value
+        result = deja_vu_logic.finish(
+            state,
+            now_value=now_local,
+            max_charge=DEJA_VU_MAX_CHARGE,
+            recharge_delay=DEJA_VU_RECHARGE_DELAY,
+        )
+        if result["snapshot"] is None:
             return
-        elapsed = max(0.0, time.time() - state["deja_vu_started_at"])
-        state["deja_vu_charge"] = max(0.0, min(DEJA_VU_MAX_CHARGE, state["deja_vu_active_budget"] - elapsed))
-        state["deja_vu_recharge_available_at"] = time.time() + DEJA_VU_RECHARGE_DELAY
-        restore_deja_vu_snapshot(state["deja_vu_snapshot"])
-        state["deja_vu_active"] = False
-        state["deja_vu_snapshot"] = None
-        state["deja_vu_ghost_acc"] = 0.0
-        state["deja_vu_active_budget"] = 0.0
-        state["deja_vu_return_started_at"] = time.time()
+        restore_deja_vu_snapshot(result["snapshot"])
+        if result["heal"] > 0 and state["player_health"] < PLAYER_MAX_HEALTH:
+            state["player_health"] = min(PLAYER_MAX_HEALTH, state["player_health"] + result["heal"])
 
     def update_deja_vu(delta_time):
         now_local = time.time()
-        state["deja_vu_ghost_trail"] = [
-            point for point in state["deja_vu_ghost_trail"]
-            if now_local - point["spawned_at"] < DEJA_VU_GHOST_LIFETIME
-        ]
-        if not state["deja_vu_active"] and now_local >= state["deja_vu_recharge_available_at"] and state["deja_vu_charge"] < DEJA_VU_MAX_CHARGE:
-            fast_rate = DEJA_VU_FAST_CHARGE_CAP / DEJA_VU_FAST_CHARGE_TIME
-            slow_charge_amount = max(0.0, DEJA_VU_MAX_CHARGE - DEJA_VU_FAST_CHARGE_CAP)
-            slow_rate = slow_charge_amount / DEJA_VU_SLOW_CHARGE_TIME if slow_charge_amount > 0 else fast_rate
-            recharge_left = max(0.0, delta_time)
-            if state["deja_vu_charge"] < DEJA_VU_FAST_CHARGE_CAP and recharge_left > 0.0:
-                fast_missing = DEJA_VU_FAST_CHARGE_CAP - state["deja_vu_charge"]
-                fast_gain = min(fast_missing, recharge_left * fast_rate)
-                state["deja_vu_charge"] += fast_gain
-                recharge_left -= fast_gain / fast_rate
-            if state["deja_vu_charge"] >= DEJA_VU_FAST_CHARGE_CAP and recharge_left > 0.0:
-                state["deja_vu_charge"] = min(DEJA_VU_MAX_CHARGE, state["deja_vu_charge"] + recharge_left * slow_rate)
-        if state["deja_vu_return_started_at"] is not None:
-            rewind_progress = (now_local - state["deja_vu_return_started_at"]) / DEJA_VU_RETURN_FADE
-            if rewind_progress >= 1.0:
-                state["deja_vu_return_started_at"] = None
-        if not state["deja_vu_active"]:
+        if state["deja_vu_death_return_pending"]:
             return
-        state["deja_vu_ghost_acc"] += delta_time
-        if state["deja_vu_ghost_acc"] >= DEJA_VU_GHOST_INTERVAL:
-            state["deja_vu_ghost_acc"] = 0.0
-            if not state["deja_vu_ghost_trail"] or math.hypot(player_x - state["deja_vu_ghost_trail"][-1]["x"], player_y - state["deja_vu_ghost_trail"][-1]["y"]) > 0.08:
-                state["deja_vu_ghost_trail"].append({"x": player_x, "y": player_y, "spawned_at": now_local})
-        if now_local - state["deja_vu_started_at"] >= state["deja_vu_active_budget"]:
-            finish_deja_vu()
+        deja_vu_logic.update_return_fade(state, now_value=now_local, return_fade=DEJA_VU_RETURN_FADE)
+        if state["deja_vu_active"]:
+            update_deja_vu_enemy_rewards(delta_time)
+        if deja_vu_logic.update_runtime(
+            state,
+            now_value=now_local,
+            delta_time=delta_time,
+            max_charge=DEJA_VU_MAX_CHARGE,
+            fast_charge_cap=DEJA_VU_FAST_CHARGE_CAP,
+            fast_charge_time=DEJA_VU_FAST_CHARGE_TIME,
+            slow_charge_time=DEJA_VU_SLOW_CHARGE_TIME,
+            ghost_lifetime=DEJA_VU_GHOST_LIFETIME,
+            ghost_interval=DEJA_VU_GHOST_INTERVAL,
+            player_x=player_x,
+            player_y=player_y,
+        ):
+            finish_deja_vu(now_local)
 
     def get_deja_vu_visual_mix(now_value):
         if state["deja_vu_active"]:
@@ -1690,6 +2058,100 @@ def start_tutor_maze_opengl(root=None):
                 _draw_rect(white_texture_id, center_x, center_y + center_h - 3, center_w, 3, (210, 255, 250), alpha=frame_alpha)
                 _draw_rect(white_texture_id, center_x, center_y, 3, center_h, (210, 255, 250), alpha=frame_alpha)
                 _draw_rect(white_texture_id, center_x + center_w - 3, center_y, 3, center_h, (210, 255, 250), alpha=frame_alpha)
+        finally:
+            end_overlay(projection, viewport)
+
+    def draw_deja_vu_failure_overlay(now_value):
+        blackout_active = deja_vu_logic.blackout_active(state, now_value=now_value)
+        freeze_active = deja_vu_logic.critical_freeze_active(state, now_value=now_value)
+        break_strength = deja_vu_logic.break_overlay_strength(state)
+        if not blackout_active and not freeze_active and break_strength <= 0.001:
+            return
+
+        projection, viewport = begin_overlay(width, height)
+        try:
+            if blackout_active:
+                _draw_rect(white_texture_id, 0, 0, width, height, (0, 0, 0), alpha=0.98)
+                blackout_start = state["deja_vu_blackout_started_at"] or now_value
+                blackout_ratio = _clamp01((now_value - blackout_start) / max(0.001, deja_vu_logic.DEJA_VU_BLACKOUT_DURATION))
+                for bar_index in range(12):
+                    band_y = int((height / 12) * bar_index + math.sin(now_value * 10.0 + bar_index) * 8.0)
+                    band_h = 8 + (bar_index % 3) * 6
+                    band_alpha = 0.06 + 0.14 * abs(math.sin(now_value * 7.0 + bar_index * 1.7))
+                    band_color = (255, 70 + (bar_index % 4) * 28, 52) if bar_index % 2 == 0 else (70, 190, 255)
+                    _draw_rect(white_texture_id, 0, band_y, width, band_h, band_color, alpha=band_alpha)
+                crack_w = max(40, int(width * (0.18 + blackout_ratio * 0.34)))
+                crack_h = max(16, int(height * (0.02 + blackout_ratio * 0.05)))
+                center_x = width // 2 - crack_w // 2
+                center_y = height // 2 - crack_h // 2
+                _draw_rect(white_texture_id, center_x, center_y, crack_w, crack_h, (240, 245, 255), alpha=0.24 + 0.18 * blackout_ratio)
+                for shard_index in range(7):
+                    shard_x = int(width * 0.5 + math.sin(now_value * 11.0 + shard_index * 0.9) * (80 + shard_index * 18))
+                    shard_y = int(height * 0.5 + math.cos(now_value * 9.0 + shard_index * 1.2) * (30 + shard_index * 10))
+                    _draw_rect(white_texture_id, shard_x, shard_y, 2 + (shard_index % 2), 16 + shard_index * 4, (255, 255, 255), alpha=0.16)
+                return
+
+            copy_framebuffer_to_texture(deja_screen_texture[0], width, height)
+            interference_alpha = 0.03 + break_strength * 0.14
+            shift = max(1, int(2 + break_strength * 9 + (3 if freeze_active else 0)))
+            draw_overlay_texture(deja_screen_texture[0], -shift, 0, width, height, tint=(1.0, 0.36, 0.28), alpha=interference_alpha)
+            draw_overlay_texture(deja_screen_texture[0], shift, 0, width, height, tint=(0.28, 0.70, 1.0), alpha=interference_alpha)
+            line_count = 5 + int(break_strength * 18)
+            for line_index in range(line_count):
+                line_y = int((height / max(1, line_count)) * line_index + math.sin(now_value * 4.5 + line_index * 1.8) * 9.0)
+                line_h = 1 + (line_index % 3)
+                alpha = 0.03 + break_strength * 0.06
+                _draw_rect(white_texture_id, 0, line_y, width, line_h, (180, 255, 250), alpha=alpha)
+            if freeze_active:
+                pulse = (math.sin(now_value * 13.0) + 1.0) * 0.5
+                _draw_rect(white_texture_id, 0, 0, width, height, (22, 30, 36), alpha=0.12 + pulse * 0.1)
+                border_alpha = 0.14 + pulse * 0.12
+                _draw_rect(white_texture_id, 0, 0, width, 3, (255, 90, 70), alpha=border_alpha)
+                _draw_rect(white_texture_id, 0, height - 3, width, 3, (110, 220, 255), alpha=border_alpha)
+                _draw_rect(white_texture_id, 0, 0, 3, height, (255, 90, 70), alpha=border_alpha)
+                _draw_rect(white_texture_id, width - 3, 0, 3, height, (110, 220, 255), alpha=border_alpha)
+        finally:
+            end_overlay(projection, viewport)
+
+    def draw_flashback_overlay(now_value):
+        if not (state["flashback_active"] or state["flashback_post_active"] or state["flashback_death_active"]):
+            return
+        projection, viewport = begin_overlay(width, height)
+        try:
+            fade_strength = deja_vu_logic.flashback_fade_strength(state, now_value=now_value)
+            if state["flashback_active"] or fade_strength > 0.001:
+                pulse = (math.sin(now_value * 8.0) + 1.0) * 0.5
+                active_mix = 1.0 if state["flashback_active"] else fade_strength
+                _draw_rect(white_texture_id, 0, 0, width, height, (132, 0, 0), alpha=(0.24 + pulse * 0.17) * active_mix)
+                _draw_rect(white_texture_id, 0, 0, width, height, (58, 0, 0), alpha=0.18 * active_mix)
+                copy_framebuffer_to_texture(deja_screen_texture[0], width, height)
+                glitch_shift = 3 + int(pulse * 6)
+                glitch_alpha = (0.08 + pulse * 0.07) * active_mix
+                draw_overlay_texture(deja_screen_texture[0], -glitch_shift, 0, width, height, tint=(1.0, 0.18, 0.18), alpha=glitch_alpha)
+                draw_overlay_texture(deja_screen_texture[0], glitch_shift, 0, width, height, tint=(1.0, 0.48, 0.18), alpha=glitch_alpha * 0.85)
+                band_count = 10
+                for band_index in range(band_count):
+                    band_y = int((height / band_count) * band_index + math.sin(now_value * 7.0 + band_index * 1.9) * 12.0)
+                    band_h = 2 + (band_index % 3) * 2
+                    _draw_rect(white_texture_id, 0, band_y, width, band_h, (255, 90, 70), alpha=(0.03 + pulse * 0.045) * active_mix)
+                for shard_index in range(8):
+                    shard_x = int((shard_index / 7.0) * width + math.sin(now_value * 9.0 + shard_index) * 26.0)
+                    shard_y = int(height * 0.18 + shard_index * (height * 0.075))
+                    _draw_rect(white_texture_id, shard_x, shard_y, 2, 18 + shard_index * 3, (255, 210, 210), alpha=0.08 * active_mix)
+            if state["flashback_post_active"]:
+                remaining = max(0.0, state["flashback_post_remaining"])
+                whole_seconds = max(0, int(math.ceil(remaining)))
+                danger = remaining <= 10.0
+                second_phase = 1.0 - (remaining % 1.0)
+                pulse_window = max(0.0, 1.0 - second_phase * (1.7 if danger else 1.25))
+                pulse = 1.0 + pulse_window * (0.30 if danger else 0.18)
+                timer_text = f"{whole_seconds:02d}s"
+                timer_color = (255, 88, 72) if danger else (255, 214, 214)
+                timer_y = 26 - int((pulse - 1.0) * 12)
+                _draw_text(font_hud_big, timer_text, timer_color, width // 2 - 20, timer_y)
+            if state["flashback_death_active"]:
+                progress = deja_vu_logic.flashback_death_progress(state, now_value=now_value)
+                _draw_rect(white_texture_id, 0, 0, width, height, (10, 0, 0), alpha=0.18 + progress * 0.52)
         finally:
             end_overlay(projection, viewport)
 
@@ -1807,7 +2269,24 @@ def start_tutor_maze_opengl(root=None):
                 task_icon_texture_id, _, _ = get_cached_texture(task_stub_small)
                 _draw_text(font_title, "TASK", (0, 255, 0), task_margin + task_pad, task_margin + task_pad)
                 draw_overlay_texture(task_icon_texture_id, task_margin + task_pad, task_margin + 32, TASK_ICON_SIZE, TASK_ICON_SIZE)
-                _draw_text(font_task, "FIND A WEAPON", (0, 255, 0), task_margin + task_pad + TASK_ICON_SIZE + 10, task_margin + 44)
+            deja_now = time.time()
+            if state["deja_vu_active"]:
+                deja_display_charge = max(0.0, state["deja_vu_active_budget"] - (deja_now - state["deja_vu_started_at"]))
+            else:
+                deja_display_charge = state["deja_vu_charge"]
+            deja_ready = deja_display_charge >= DEJA_VU_MIN_ACTIVATION and deja_vu_available()
+            if deja_vu_logic.deja_vu_locked(state):
+                deja_state = "LOCKED"
+                deja_color = (180, 96, 96)
+            elif state["deja_vu_active"] or deja_ready:
+                deja_color = (120, 255, 235)
+                deja_state = f"{deja_display_charge:04.1f}s"
+            else:
+                deja_color = (110, 130, 130)
+                if deja_now < state["deja_vu_recharge_available_at"]:
+                    deja_state = f"WAIT {max(0.0, state['deja_vu_recharge_available_at'] - deja_now):03.1f}s"
+                else:
+                    deja_state = f"{deja_display_charge:04.1f}s"
 
             hud_x = width - hud_w - 20
             hud_y = height - hud_h - 20
@@ -1831,21 +2310,6 @@ def start_tutor_maze_opengl(root=None):
             _draw_rect(white_texture_id, hud_x + 30, hud_y + hud_h - 55, 80, 28, (0, 0, 0), alpha=0.8)
             _draw_text(font_clock, f"{minutes:02}:{seconds:02}:{milliseconds:03}", (0, 255, 0), hud_x + 35, hud_y + hud_h - 49)
 
-            deja_now = time.time()
-            if state["deja_vu_active"]:
-                deja_display_charge = max(0.0, state["deja_vu_active_budget"] - (deja_now - state["deja_vu_started_at"]))
-            else:
-                deja_display_charge = state["deja_vu_charge"]
-            deja_ready = deja_display_charge >= DEJA_VU_MIN_ACTIVATION and deja_vu_available()
-            if state["deja_vu_active"] or deja_ready:
-                deja_color = (120, 255, 235)
-                deja_state = f"{deja_display_charge:04.1f}s"
-            else:
-                deja_color = (110, 130, 130)
-                if deja_now < state["deja_vu_recharge_available_at"]:
-                    deja_state = f"WAIT {max(0.0, state['deja_vu_recharge_available_at'] - deja_now):03.1f}s"
-                else:
-                    deja_state = f"{deja_display_charge:04.1f}s"
             deja_x = hud_x - 220
             deja_y = hud_y + 20
             _draw_rect(white_texture_id, deja_x, deja_y, 190, 56, (0, 18, 18), alpha=0.86)
@@ -1899,20 +2363,338 @@ def start_tutor_maze_opengl(root=None):
                 if hand_swap_active and hand_previous_item_id is not None:
                     previous_pil = get_hand_pil_for_item(hand_previous_item_id)
                     if previous_pil is not None:
-                        prev_image = build_hand_image(previous_pil, hand_previous_item_id)
-                        prev_texture_id, prev_w, prev_h = create_texture_from_pil(prev_image)
+                        prev_texture_id, prev_w, prev_h = get_cached_hand_texture(previous_pil, hand_previous_item_id)
                         previous_y = gun_y + int(hand_slide_distance * hand_swap_eased)
                         draw_overlay_texture(prev_texture_id, width // 2 - prev_w // 2, previous_y - prev_h, prev_w, prev_h)
-                        delete_texture(prev_texture_id)
                 current_pil = get_hand_pil_for_item(hand_target_item_id)
                 if current_pil is not None:
-                    current_image = build_hand_image(current_pil, hand_target_item_id)
-                    current_texture_id, current_w, current_h = create_texture_from_pil(current_image)
+                    current_texture_id, current_w, current_h = get_cached_hand_texture(current_pil, hand_target_item_id)
                     current_y = gun_y if not hand_swap_active else gun_y + int(hand_slide_distance * (1.0 - hand_swap_eased))
                     draw_overlay_texture(current_texture_id, width // 2 - current_w // 2, current_y - current_h, current_w, current_h)
-                    delete_texture(current_texture_id)
         finally:
             end_overlay(projection, viewport)
+
+    def draw_intro_overlay():
+        nonlocal intro_active, intro_index, intro_fade_started
+        if not intro_active:
+            return
+        progress = (time.time() - intro_start) / intro_duration
+        if progress >= 1.0:
+            intro_active = False
+            return
+        backdrop_alpha = max(0.22, 0.55 - progress * 0.28)
+        _draw_rect(white_texture_id, 0, 0, width, height, (0, 0, 0), alpha=backdrop_alpha)
+        for pixel in pixel_grid:
+            px, py, enabled = pixel
+            if enabled and random.random() < progress * 0.2:
+                pixel[2] = False
+            if pixel[2]:
+                shade = random.randint(0, 120)
+                _draw_rect(white_texture_id, px, py, pixel_size, pixel_size, (shade, shade, shade), alpha=0.92)
+        if intro_index < len(intro_text):
+            intro_index += 1
+        shown = intro_text[:intro_index]
+        if intro_index >= len(intro_text):
+            intro_fade_started = True
+        current_font = font_intro
+        if intro_fade_started:
+            fade_time = max(0.0, time.time() - intro_start - 2.0)
+            remain_ratio = max(0.0, 1.0 - fade_time * 0.25)
+            visible_len = int(len(shown) * remain_ratio)
+            shown = shown[:visible_len]
+            chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#@!?$%"
+            glitched = []
+            for ch in shown:
+                glitched.append(random.choice(chars) if random.random() < 0.15 * fade_time else ch)
+            shown = "".join(glitched)
+            font_size = int(42 * remain_ratio)
+            if font_size <= 6 or visible_len <= 0:
+                intro_active = False
+                return
+            current_font = runtime_make_font(font_size)
+        if shown:
+            bbox = current_font.getbbox(shown)
+            text_w = max(1, bbox[2] - bbox[0] + 2)
+            text_h = max(1, bbox[3] - bbox[1] + 2)
+            panel_x = width // 2 - text_w // 2 - 28
+            panel_y = height // 2 - text_h // 2 - 18
+            panel_w = text_w + 56
+            panel_h = text_h + 36
+            _draw_rect(white_texture_id, panel_x, panel_y, panel_w, panel_h, (0, 12, 0), alpha=0.82)
+            _draw_rect(white_texture_id, panel_x, panel_y, panel_w, 2, (0, 255, 136), alpha=1.0)
+            _draw_rect(white_texture_id, panel_x, panel_y + panel_h - 2, panel_w, 2, (0, 255, 136), alpha=1.0)
+            _draw_rect(white_texture_id, panel_x, panel_y, 2, panel_h, (0, 255, 136), alpha=1.0)
+            _draw_rect(white_texture_id, panel_x + panel_w - 2, panel_y, 2, panel_h, (0, 255, 136), alpha=1.0)
+            _draw_text(current_font, shown, (0, 255, 136), width // 2 - text_w // 2, height // 2 - text_h // 2)
+
+    def draw_door_overlay(progress):
+        progress = _clamp01(progress)
+        frame_index = int(progress * (len(door_left_frames) - 1))
+        left_image = door_left_frames[frame_index].resize((max(1, width // 2), height), Image.NEAREST)
+        right_image = door_right_frames[frame_index].resize((max(1, width // 2), height), Image.NEAREST)
+        left_texture_id, left_w, left_h = create_texture_from_pil(left_image)
+        right_texture_id, right_w, right_h = create_texture_from_pil(right_image)
+        try:
+            seam_gap = int((1.0 - progress) * width * 0.36)
+            seam_gap = max(int(width * 0.02), seam_gap)
+            left_x = -(left_w - (width // 2 - seam_gap // 2))
+            right_x = width // 2 + seam_gap // 2
+            draw_overlay_texture(left_texture_id, left_x, 0, left_w, left_h)
+            draw_overlay_texture(right_texture_id, right_x, 0, right_w, right_h)
+        finally:
+            delete_texture(left_texture_id)
+            delete_texture(right_texture_id)
+
+    def draw_elevator_glitch_overlay(now_value):
+        if not (state["elevator_active"] or state["stats_window_active"]) or state["elevator_start_time"] <= 0.0:
+            return
+        elapsed = now_value - state["elevator_start_time"]
+        shake_start = ELEV_DOOR_CLOSE_DUR
+        if elapsed < shake_start:
+            return
+        shake_effective = max(1e-6, ELEV_TOTAL_DUR - shake_start)
+        ratio = _clamp01((elapsed - shake_start) / shake_effective)
+        if ratio >= 1.0 and state["stats_window_active"]:
+            ratio = 1.0
+        jitter_alpha = min(0.28, 0.08 + ratio * 0.18)
+        jitter_shift = max(1, int(2 + ratio * 3))
+        draw_overlay_texture(scene_texture[0], -jitter_shift, 0, width, height, alpha=jitter_alpha)
+        draw_overlay_texture(scene_texture[0], jitter_shift, 0, width, height, alpha=jitter_alpha)
+        fill_ratio = _clamp01(ratio ** 0.35)
+        if ratio >= 1.0 and state["stats_window_active"]:
+            fill_ratio = 1.0
+        fill_count = int(len(pixel_grid_full) * fill_ratio)
+        stride = 2 if fill_count > 900 else 1
+        extra = int(160 * fill_ratio)
+        for idx in range(0, fill_count, stride):
+            px, py = pixel_grid_full[idx]
+            shade = max(0, min(255, random.randint(0, 120) + extra))
+            _draw_rect(white_texture_id, px, py, pixel_size, pixel_size, (shade, shade, shade), alpha=0.92)
+
+    def draw_statistics_overlay(now_value):
+        if not state["stats_window_active"]:
+            return
+        if state["stats_counting_active"]:
+            count_elapsed = now_value - state["stats_count_start"]
+            if count_elapsed >= stats_count_duration:
+                state["stats_counting_active"] = False
+                state["stats_completed"] = True
+                if flash_enabled:
+                    state["stats_flash_active"] = True
+                    state["stats_flash_start"] = now_value
+                else:
+                    state["stats_icon_active"] = True
+                    state["stats_icon_pulse_time"] = 0.0
+        if state["stats_flash_active"] and now_value - state["stats_flash_start"] >= stats_flash_duration:
+            state["stats_flash_active"] = False
+            state["stats_icon_active"] = True
+            state["stats_icon_pulse_time"] = 0.0
+        if state["stats_animation_start"] == 0.0:
+            state["stats_animation_start"] = now_value
+        anim_elapsed = now_value - state["stats_animation_start"]
+        slide_progress = _clamp01(anim_elapsed / 1.2)
+        slide_eased = _ease_out_cubic(slide_progress)
+        if slide_progress > 0.3:
+            shake_progress = (slide_progress - 0.3) / 0.7
+            shake_intensity = math.sin(shake_progress * math.pi * 4.0) * 5.0 * (1.0 - shake_progress * 0.5)
+            state["stats_shake_offset"] = random.uniform(-shake_intensity, shake_intensity)
+        state["stats_float_time"] += delta
+        state["stats_float_offset_x"] = math.sin(state["stats_float_time"] * 2.0) * 3.0
+        state["stats_float_offset_y"] = math.sin(state["stats_float_time"] * 2.6 + math.pi / 4.0) * 2.0
+        window_w = 500
+        window_h = 400
+        target_y = height // 2 - window_h // 2
+        start_y = -window_h
+        state["stats_window_y"] = start_y + (target_y - start_y) * slide_eased + state["stats_shake_offset"] + state["stats_float_offset_y"]
+        window_x = width // 2 - window_w // 2 + state["stats_float_offset_x"]
+        window_y = state["stats_window_y"]
+        if state["elevator_start_time"] > 0.0:
+            elevator_elapsed = now_value - state["elevator_start_time"]
+            pixel_fill_ratio = 0.0
+            if elevator_elapsed >= (ELEV_DOOR_CLOSE_DUR + ELEV_DOOR_HOLD_DUR):
+                shake_start = ELEV_DOOR_CLOSE_DUR
+                effective = max(1e-6, ELEV_TOTAL_DUR - shake_start)
+                pixel_fill_ratio = _clamp01(((elevator_elapsed - shake_start) / effective) ** 0.35)
+                if state["stats_window_active"]:
+                    pixel_fill_ratio = 1.0
+        else:
+            pixel_fill_ratio = 1.0
+        if pixel_fill_ratio <= 0.01 or slide_progress <= 0.01:
+            return
+        if flash_enabled and state["stats_flash_active"]:
+            flash_alpha = 1.0 - ((now_value - state["stats_flash_start"]) / stats_flash_duration)
+            _draw_rect(white_texture_id, 0, 0, width, height, (255, 255, 255), alpha=max(0.0, min(1.0, flash_alpha)))
+        _draw_rect(white_texture_id, 0, 0, width, height, (0, 0, 0), alpha=min(0.72, 0.18 + slide_progress * 0.5))
+        _draw_rect(white_texture_id, window_x, window_y, window_w, window_h, (0, 255, 0), alpha=1.0)
+        _draw_rect(white_texture_id, window_x + 3, window_y + 3, window_w - 6, window_h - 6, (0, 0, 0), alpha=1.0)
+        title = "LEVEL COMPLETE"
+        title_bbox = font_stats.getbbox(title)
+        title_w = max(1, title_bbox[2] - title_bbox[0] + 2)
+        _draw_text(font_stats, title, (0, 255, 0), int(window_x + window_w // 2 - title_w // 2), int(window_y + 30))
+        stats_y = int(window_y + 80)
+        line_height = 35
+        if state["stats_counting_active"]:
+            count_elapsed = now_value - state["stats_count_start"]
+            count_progress = _clamp01(count_elapsed / stats_count_duration)
+            current_time = state["elevator_enter_time"] * count_progress
+            enemies_defeated = int(state["enemies_killed"] * count_progress)
+            items_collected = int(1 * count_progress)
+            shots_fired = int(state["total_shots_fired"] * count_progress)
+            shots_hit = int(state["total_shots_hit"] * count_progress)
+            accuracy_full = int((state["total_shots_hit"] / max(1, state["total_shots_fired"])) * 100) if state["total_shots_fired"] > 0 else 0
+            accuracy = int(accuracy_full * count_progress)
+            state["stats_progress_bar_current"] = stats_progress_bar_target * count_progress
+        else:
+            current_time = state["elevator_enter_time"]
+            enemies_defeated = state["enemies_killed"]
+            items_collected = 1
+            shots_fired = state["total_shots_fired"]
+            shots_hit = state["total_shots_hit"]
+            accuracy = int((state["total_shots_hit"] / max(1, state["total_shots_fired"])) * 100) if state["total_shots_fired"] > 0 else 0
+            state["stats_progress_bar_current"] = stats_progress_bar_target
+        entry_minutes = int(current_time // 60) % 60
+        entry_seconds = int(current_time % 60)
+        entry_milliseconds = int((current_time % 1) * 1000)
+        lines = [
+            f"Entry Time: {entry_minutes:02}:{entry_seconds:02}:{entry_milliseconds:03}",
+            f"Enemies Defeated: {enemies_defeated}",
+            f"Items Collected: {items_collected}",
+            f"Shots Fired: {shots_fired}",
+            f"Shots Hit: {shots_hit}",
+            f"Accuracy: {accuracy}%",
+            "Rank: TRAINEE",
+        ]
+        for idx, line in enumerate(lines):
+            _draw_text(font_stats_small, line, (0, 255, 0), int(window_x + 40), stats_y + line_height * idx)
+        progress_x = int(window_x + window_w - 60)
+        progress_y = stats_y + 10
+        progress_w = 20
+        progress_h = 160
+        _draw_rect(white_texture_id, progress_x, progress_y, progress_w, progress_h, (50, 50, 50), alpha=0.9)
+        fill_height = int((state["stats_progress_bar_current"] / 100.0) * progress_h)
+        if fill_height > 0:
+            _draw_rect(white_texture_id, progress_x, progress_y + progress_h - fill_height, progress_w, fill_height, (0, 255, 0), alpha=0.95)
+        _draw_text(font_stats_small, f"{int(state['stats_progress_bar_current'])}%", (0, 255, 0), progress_x - 10, progress_y - 25)
+        if state["stats_completed"]:
+            button_w = 120
+            button_h = 40
+            button_x = int(window_x + window_w // 2 - button_w // 2)
+            button_y = int(window_y + window_h - 70)
+            _draw_rect(white_texture_id, button_x, button_y, button_w, 2, (0, 255, 0), alpha=1.0)
+            _draw_rect(white_texture_id, button_x, button_y + button_h - 2, button_w, 2, (0, 255, 0), alpha=1.0)
+            _draw_rect(white_texture_id, button_x, button_y, 2, button_h, (0, 255, 0), alpha=1.0)
+            _draw_rect(white_texture_id, button_x + button_w - 2, button_y, 2, button_h, (0, 255, 0), alpha=1.0)
+            ok_bbox = font_stats.getbbox("OK")
+            ok_w = max(1, ok_bbox[2] - ok_bbox[0] + 2)
+            _draw_text(font_stats, "OK", (0, 255, 0), button_x + button_w // 2 - ok_w // 2, button_y + 6)
+            hint = "Press ENTER or SPACE to continue"
+        else:
+            hint = "Click to skip animation"
+        hint_bbox = font_stats_small.getbbox(hint)
+        hint_w = max(1, hint_bbox[2] - hint_bbox[0] + 2)
+        _draw_text(font_stats_small, hint, (0, 255, 0), int(window_x + window_w // 2 - hint_w // 2), int(window_y + window_h - 25))
+        if state["stats_icon_active"]:
+            state["stats_icon_pulse_time"] += delta
+            pulse_ratio = (math.sin(state["stats_icon_pulse_time"] * 3.0) + 1.0) / 2.0
+            icon_size = int(stats_icon_base_size + (stats_icon_max_size - stats_icon_base_size) * pulse_ratio)
+            icon_image = stats_icon_raw.rotate(45, expand=True).resize((icon_size, icon_size), Image.NEAREST)
+            icon_texture_id, icon_w, icon_h = create_texture_from_pil(icon_image)
+            try:
+                draw_overlay_texture(icon_texture_id, int(window_x + window_w - icon_w * 0.5), int(window_y - icon_h * 0.35), icon_w, icon_h)
+            finally:
+                delete_texture(icon_texture_id)
+
+    def draw_dev_debug_overlay():
+        if not state["dev_debug_window_active"]:
+            return
+        projection, viewport = begin_overlay(width, height)
+        try:
+            panel_w = 560
+            panel_h = 250
+            panel_x = width // 2 - panel_w // 2
+            panel_y = height // 2 - panel_h // 2
+            _draw_rect(white_texture_id, 0, 0, width, height, (0, 0, 0), alpha=0.72)
+            _draw_rect(white_texture_id, panel_x, panel_y, panel_w, panel_h, (0, 18, 18), alpha=0.96)
+            _draw_rect(white_texture_id, panel_x, panel_y, panel_w, 2, (120, 255, 235), alpha=1.0)
+            _draw_rect(white_texture_id, panel_x, panel_y + panel_h - 2, panel_w, 2, (120, 255, 235), alpha=1.0)
+            _draw_rect(white_texture_id, panel_x, panel_y, 2, panel_h, (120, 255, 235), alpha=1.0)
+            _draw_rect(white_texture_id, panel_x + panel_w - 2, panel_y, 2, panel_h, (120, 255, 235), alpha=1.0)
+
+            _draw_text(font_hud_big, "DEVELOPER DEBUG", (120, 255, 235), panel_x + 20, panel_y + 18)
+            _draw_text(font_hud, "Deja Vu break level", (210, 240, 238), panel_x + 22, panel_y + 66)
+
+            current_level = int(max(0, min(deja_vu_logic.DEJA_VU_BREAK_MAX_LEVEL, state["deja_vu_break_level"])))
+            bar_x = panel_x + 24
+            bar_y = panel_y + 108
+            slot_w = 56
+            slot_h = 42
+            slot_gap = 8
+            for level in range(deja_vu_logic.DEJA_VU_BREAK_MAX_LEVEL + 1):
+                x = bar_x + level * (slot_w + slot_gap)
+                active = level == current_level
+                filled = level <= current_level
+                fill_color = (255, 104, 76) if filled else (28, 40, 40)
+                border_color = (255, 190, 180) if active else (120, 255, 235)
+                _draw_rect(white_texture_id, x, bar_y, slot_w, slot_h, fill_color, alpha=0.82 if filled else 0.48)
+                _draw_rect(white_texture_id, x, bar_y, slot_w, 2, border_color, alpha=1.0)
+                _draw_rect(white_texture_id, x, bar_y + slot_h - 2, slot_w, 2, border_color, alpha=1.0)
+                _draw_rect(white_texture_id, x, bar_y, 2, slot_h, border_color, alpha=1.0)
+                _draw_rect(white_texture_id, x + slot_w - 2, bar_y, 2, slot_h, border_color, alpha=1.0)
+                text_x = x + 20 if level < 10 else x + 14
+                _draw_text(font_hud, str(level), (255, 255, 255), text_x, bar_y + 10)
+
+            _draw_text(font_hud_big, f"CURRENT: {current_level}/8", (255, 220, 210), panel_x + 22, panel_y + 166)
+            _draw_text(font_slot, "0-8 set level  |  Left/Right adjust  |  ` or ESC close", (170, 220, 216), panel_x + 22, panel_y + 212)
+        finally:
+            end_overlay(projection, viewport)
+
+    def draw_rob_dialog_overlay():
+        if not rob_dialog_active():
+            return
+        current_dialog = state["rob_state"].get("current_dialog") or rob_logic.INTRO_DIALOG
+        choices = list(current_dialog.get("choices", ()))
+        if len(choices) < 2:
+            return
+        projection, viewport = begin_overlay(width, height)
+        try:
+            panel_w = 720
+            panel_h = 270
+            panel_x = width // 2 - panel_w // 2
+            panel_y = height - panel_h - 56
+            _draw_rect(white_texture_id, 0, 0, width, height, (0, 0, 0), alpha=0.38)
+            _draw_rect(white_texture_id, panel_x, panel_y, panel_w, panel_h, (6, 16, 10), alpha=0.96)
+            _draw_rect(white_texture_id, panel_x, panel_y, panel_w, 2, (120, 255, 150), alpha=1.0)
+            _draw_rect(white_texture_id, panel_x, panel_y + panel_h - 2, panel_w, 2, (120, 255, 150), alpha=1.0)
+            _draw_rect(white_texture_id, panel_x, panel_y, 2, panel_h, (120, 255, 150), alpha=1.0)
+            _draw_rect(white_texture_id, panel_x + panel_w - 2, panel_y, 2, panel_h, (120, 255, 150), alpha=1.0)
+            _draw_text(font_hud_big, "ROB", (120, 255, 150), panel_x + 26, panel_y + 18)
+            _draw_text(font_hud, current_dialog["prompt"], (230, 245, 232), panel_x + 28, panel_y + 64)
+            bad_rect = pygame.Rect(panel_x + 28, panel_y + 128, panel_w - 56, 44)
+            good_rect = pygame.Rect(panel_x + 28, panel_y + 186, panel_w - 56, 44)
+            mouse_pos = pygame.mouse.get_pos()
+            for rect, label, hovered in (
+                (bad_rect, f"1. {choices[0]['text']}", bad_rect.collidepoint(mouse_pos)),
+                (good_rect, f"2. {choices[1]['text']}", good_rect.collidepoint(mouse_pos)),
+            ):
+                fill = (28, 56, 34) if hovered else (10, 22, 14)
+                edge = (190, 120, 120) if rect == bad_rect else (120, 255, 180)
+                _draw_rect(white_texture_id, rect.x, rect.y, rect.width, rect.height, fill, alpha=0.98)
+                _draw_rect(white_texture_id, rect.x, rect.y, rect.width, 2, edge, alpha=1.0)
+                _draw_rect(white_texture_id, rect.x, rect.y + rect.height - 2, rect.width, 2, edge, alpha=1.0)
+                _draw_rect(white_texture_id, rect.x, rect.y, 2, rect.height, edge, alpha=1.0)
+                _draw_rect(white_texture_id, rect.x + rect.width - 2, rect.y, 2, rect.height, edge, alpha=1.0)
+                _draw_text(font_hud, label, (240, 245, 240), rect.x + 12, rect.y + 12)
+        finally:
+            end_overlay(projection, viewport)
+
+    def choose_rob_dialog_option(option_index):
+        choices = list((state["rob_state"].get("current_dialog") or rob_logic.INTRO_DIALOG).get("choices", ()))
+        if option_index < 0 or option_index >= len(choices):
+            return
+        result = rob_logic.resolve_dialog_choice(state["rob_state"], player_x, player_y, time.time(), choices[option_index]["id"])
+        heal_amount = int(result.get("heal_player", 0))
+        if heal_amount > 0 and state["player_health"] < PLAYER_MAX_HEALTH:
+            state["player_health"] = min(PLAYER_MAX_HEALTH, state["player_health"] + heal_amount)
 
     def trigger_mannequin_attack(now_value):
         if state["mannequin_restart_at"] is not None:
@@ -1929,8 +2711,46 @@ def start_tutor_maze_opengl(root=None):
         update_music(delta)
         delta = max(1.0 / 240.0, min(delta, 0.05))
         now = time.time()
+        if deja_vu_logic.should_complete_death_break(state, now_value=now):
+            finish_deja_vu(now)
+            deja_vu_logic.complete_death_break(state, now_value=now)
+        if state["flashback_pending"] and not deja_vu_logic.critical_freeze_active(state, now_value=now):
+            deja_vu_logic.start_flashback(state, now_value=now)
+            state["flashback_last_kill_count"] = state["enemies_killed"]
+        if deja_vu_logic.flashback_should_end(state, now_value=now):
+            deja_vu_logic.finish_flashback(state, now_value=now)
+            state["flashback_last_kill_count"] = state["enemies_killed"]
+        if state["flashback_post_active"] and state["enemies_killed"] > state["flashback_last_kill_count"]:
+            kill_delta = state["enemies_killed"] - state["flashback_last_kill_count"]
+            deja_vu_logic.add_flashback_post_time(state, extra_seconds=kill_delta * deja_vu_logic.FLASHBACK_KILL_BONUS)
+            state["flashback_last_kill_count"] = state["enemies_killed"]
+        elif not state["flashback_post_active"]:
+            state["flashback_last_kill_count"] = state["enemies_killed"]
+        if deja_vu_logic.update_flashback_post(state, delta_time=delta):
+            deja_vu_logic.start_flashback_death(state, now_value=now)
+        if deja_vu_logic.flashback_death_finished(state, now_value=now):
+            next_action = "restart"
+            running = False
+            continue
+        for _ in range(deja_vu_logic.consume_critical_break_effects(state, now_value=now)):
+            spawn_player_break_effect()
+        deja_vu_blackout_active = deja_vu_logic.blackout_active(state, now_value=now)
+        deja_vu_freeze_active = deja_vu_logic.critical_freeze_active(state, now_value=now)
+        gameplay_hard_pause = (
+            deja_vu_blackout_active
+            or deja_vu_freeze_active
+            or state["dev_debug_window_active"]
+            or state["flashback_death_active"]
+        )
+        rob_dialog_pause = rob_interaction_locked(now)
+        if rob_dialog_pause:
+            pygame.event.set_grab(False)
+            pygame.mouse.set_visible(True)
+        elif not state["stats_window_active"]:
+            pygame.event.set_grab(True)
+            pygame.mouse.set_visible(False)
 
-        if not state["deja_vu_active"] and (
+        if not state["deja_vu_active"] and not state["deja_vu_death_return_pending"] and (
             (state["mannequin_restart_at"] is not None and now >= state["mannequin_restart_at"])
             or (state["player_restart_at"] is not None and now >= state["player_restart_at"])
         ):
@@ -1939,50 +2759,69 @@ def start_tutor_maze_opengl(root=None):
             continue
 
         fps_timer += delta
+        caption_timer += delta
         if fps_timer >= 0.2:
             fps_display = int(clock.get_fps())
             fps_timer = 0.0
 
-        update_hand_swap(delta)
+        if not gameplay_hard_pause:
+            update_hand_swap(delta)
 
-        if gunshoot_animating:
-            shoot_acc += delta
-            while shoot_acc >= 0.05 and gunshoot_animating:
-                shoot_acc -= 0.05
-                gunshoot_frame_index += 1
-                if gunshoot_frame_index >= len(gunshoot_frames_raw):
-                    gunshoot_animating = False
-                    gunshoot_frame_index = 0
+            if gunshoot_animating:
+                shoot_acc += delta
+                while shoot_acc >= 0.05 and gunshoot_animating:
+                    shoot_acc -= 0.05
+                    gunshoot_frame_index += 1
+                    if gunshoot_frame_index >= len(gunshoot_frames_raw):
+                        gunshoot_animating = False
+                        gunshoot_frame_index = 0
 
-        if reload_anim_active and state["reloading"]:
-            reload_acc += delta
-            while reload_acc >= 0.06 and state["reloading"]:
-                reload_acc -= 0.06
-                reload_anim_index += 1
-                if reload_anim_index >= len(gunreload_frames_raw):
-                    state["reloading"] = False
-                    reload_anim_active = False
-                    reload_anim_index = 0
-                    state["ammo"] = state["max_ammo"]
+            if reload_anim_active and state["reloading"]:
+                reload_acc += delta
+                while reload_acc >= 0.06 and state["reloading"]:
+                    reload_acc -= 0.06
+                    reload_anim_index += 1
+                    if reload_anim_index >= len(gunreload_frames_raw):
+                        state["reloading"] = False
+                        reload_anim_active = False
+                        reload_anim_index = 0
+                        state["ammo"] = state["max_ammo"]
 
-        if punch_animating:
-            punch_acc += delta
-            punch_frames = right_punch_frames_raw if punch_side == "right" else left_punch_frames_raw
-            while punch_acc >= 0.05 and punch_animating:
-                punch_acc -= 0.05
-                punch_frame_index += 1
-                if punch_frame_index >= len(punch_frames):
-                    punch_animating = False
-                    punch_frame_index = 0
+            if punch_animating:
+                punch_acc += delta
+                punch_frames = right_punch_frames_raw if punch_side == "right" else left_punch_frames_raw
+                while punch_acc >= 0.05 and punch_animating:
+                    punch_acc -= 0.05
+                    punch_frame_index += 1
+                    if punch_frame_index >= len(punch_frames):
+                        punch_animating = False
+                        punch_frame_index = 0
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.KEYDOWN:
+                if rob_dialog_pause:
+                    if event.key == pygame.K_1:
+                        choose_rob_dialog_option(0)
+                    elif event.key == pygame.K_2:
+                        choose_rob_dialog_option(1)
+                    continue
+                if event.key == pygame.K_BACKQUOTE or event.unicode in {"`", "~", "ё", "Ё"}:
+                    was_active = state["dev_debug_window_active"]
+                    state["dev_debug_window_active"] = not state["dev_debug_window_active"]
+                    if was_active and not state["dev_debug_window_active"] and state["deja_vu_break_level"] >= deja_vu_logic.DEJA_VU_BREAK_MAX_LEVEL:
+                        start_break_sequence_from_debug(now)
+                    continue
                 if event.key == pygame.K_ESCAPE:
+                    if state["dev_debug_window_active"]:
+                        state["dev_debug_window_active"] = False
+                        if state["deja_vu_break_level"] >= deja_vu_logic.DEJA_VU_BREAK_MAX_LEVEL:
+                            start_break_sequence_from_debug(now)
+                        continue
                     pygame.event.set_grab(False)
                     pygame.mouse.set_visible(True)
-                    pause_action = run_pause_menu_opengl(clock, width, height, title="Paused")
+                    pause_action = runtime_run_pause_menu_opengl(clock, width, height, title="Paused")
                     pygame.event.set_grab(True)
                     pygame.mouse.set_visible(False)
                     pygame.mouse.get_rel()
@@ -1993,11 +2832,40 @@ def start_tutor_maze_opengl(root=None):
                         next_action = "quit"
                         running = False
                     continue
+                elif state["dev_debug_window_active"]:
+                    if event.key == pygame.K_LEFT:
+                        state["deja_vu_break_level"] = max(0, state["deja_vu_break_level"] - 1)
+                    elif event.key == pygame.K_RIGHT:
+                        state["deja_vu_break_level"] = min(deja_vu_logic.DEJA_VU_BREAK_MAX_LEVEL, state["deja_vu_break_level"] + 1)
+                    elif event.unicode and event.unicode in "012345678":
+                        state["deja_vu_break_level"] = int(event.unicode)
+                    continue
+                elif gameplay_hard_pause:
+                    continue
+                elif state["stats_window_active"]:
+                    if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        if state["stats_completed"]:
+                            state["stats_window_active"] = False
+                            state["elevator_active"] = False
+                            state["elevator_transition_to_testing"] = True
+                            running = False
+                        elif state["stats_can_skip"]:
+                            state["stats_completed"] = True
+                            state["stats_counting_active"] = False
+                            state["stats_progress_bar_current"] = stats_progress_bar_target
+                            if flash_enabled:
+                                state["stats_flash_active"] = True
+                                state["stats_flash_start"] = time.time()
+                            else:
+                                state["stats_icon_active"] = True
+                                state["stats_icon_pulse_time"] = 0.0
+                    continue
                 elif event.key == pygame.K_SPACE:
                     if (
                         not restart_pending()
                         and not state["elevator_active"]
                         and not state["start_cutscene_active"]
+                        and not state["stats_window_active"]
                     ):
                         ground_z = get_walk_support_height(player_x, player_y, z_hint=player_z)
                         if player_z <= ground_z + 0.02:
@@ -2005,7 +2873,7 @@ def start_tutor_maze_opengl(root=None):
                             vertical_velocity = jump_speed
                 elif restart_pending():
                     continue
-                elif state["elevator_active"] or state["start_cutscene_active"]:
+                elif state["elevator_active"] or state["start_cutscene_active"] or state["stats_window_active"]:
                     continue
                 elif event.unicode and event.unicode in "12345":
                     state["selected_slot"] = int(event.unicode)
@@ -2017,12 +2885,41 @@ def start_tutor_maze_opengl(root=None):
                     show_fps_overlay = not show_fps_overlay
                     save_settings({"show_fps": show_fps_overlay})
             elif event.type == pygame.MOUSEBUTTONDOWN:
+                if rob_dialog_pause:
+                    if event.button == 1:
+                        panel_w = 720
+                        panel_h = 270
+                        panel_x = width // 2 - panel_w // 2
+                        panel_y = height - panel_h - 56
+                        bad_rect = pygame.Rect(panel_x + 28, panel_y + 128, panel_w - 56, 44)
+                        good_rect = pygame.Rect(panel_x + 28, panel_y + 186, panel_w - 56, 44)
+                        if bad_rect.collidepoint(event.pos):
+                            choose_rob_dialog_option(0)
+                        elif good_rect.collidepoint(event.pos):
+                            choose_rob_dialog_option(1)
+                    continue
+                if gameplay_hard_pause:
+                    continue
+                if state["stats_window_active"]:
+                    if state["stats_can_skip"] and not state["stats_completed"]:
+                        state["stats_completed"] = True
+                        state["stats_counting_active"] = False
+                        state["stats_progress_bar_current"] = stats_progress_bar_target
+                        if flash_enabled:
+                            state["stats_flash_active"] = True
+                            state["stats_flash_start"] = time.time()
+                        else:
+                            state["stats_icon_active"] = True
+                            state["stats_icon_pulse_time"] = 0.0
+                    continue
                 if state["elevator_active"] or state["start_cutscene_active"] or restart_pending():
                     continue
                 if event.button in (1, 3):
                     use_selected_item(event.button)
             elif event.type == pygame.MOUSEWHEEL:
-                if state["elevator_active"] or state["start_cutscene_active"] or restart_pending():
+                if rob_dialog_pause or gameplay_hard_pause:
+                    continue
+                if state["elevator_active"] or state["start_cutscene_active"] or state["stats_window_active"] or restart_pending():
                     continue
                 if event.y > 0:
                     state["selected_slot"] -= 1
@@ -2036,33 +2933,60 @@ def start_tutor_maze_opengl(root=None):
         move_x = 0.0
         move_y = 0.0
         moving = False
-        if state["start_cutscene_active"]:
+        if rob_dialog_pause:
+            rob_target_angle = math.atan2(state["rob_state"]["y"] - player_y, state["rob_state"]["x"] - player_x)
+            player_angle = wrap_angle(player_angle + wrap_angle(rob_target_angle - player_angle) * min(1.0, delta * 8.5))
+        elif state["start_cutscene_active"]:
             if not state["start_cutscene_started"]:
                 state["start_cutscene_started"] = True
                 state["start_cutscene_start_time"] = time.time()
             elapsed = max(0.0, time.time() - state["start_cutscene_start_time"])
-            if elapsed < 0.55 + 0.7:
-                if elapsed >= 0.55:
-                    move_ratio = _ease_out_cubic((elapsed - 0.55) / 0.7)
+            state["start_cutscene_open_t"] = 0.0
+            state["start_cutscene_close_t"] = 0.0
+            if elapsed < START_DOOR_WAIT_DUR:
+                state["start_cutscene_open_t"] = 0.0
+            elif elapsed < START_DOOR_WAIT_DUR + START_DOOR_OPEN_DUR + START_MOVE_DUR:
+                open_elapsed = elapsed - START_DOOR_WAIT_DUR
+                state["start_cutscene_open_t"] = _clamp01(open_elapsed / START_DOOR_OPEN_DUR)
+                if open_elapsed >= START_DOOR_OPEN_DUR:
+                    move_ratio = _ease_out_cubic((open_elapsed - START_DOOR_OPEN_DUR) / START_MOVE_DUR)
                     player_x = player_spawn_x - player_start_cutscene_offset + player_start_cutscene_offset * move_ratio
                     player_y = player_spawn_y
-            elif elapsed < 0.55 + 0.7 + 0.45:
+            elif elapsed < START_DOOR_WAIT_DUR + START_DOOR_OPEN_DUR + START_MOVE_DUR + START_DOOR_CLOSE_DUR:
                 player_x = player_spawn_x + 0.02
                 player_y = player_spawn_y
+                state["start_cutscene_open_t"] = 1.0
+                state["start_cutscene_close_t"] = _clamp01((elapsed - START_DOOR_WAIT_DUR - START_DOOR_OPEN_DUR - START_MOVE_DUR) / START_DOOR_CLOSE_DUR)
             else:
                 player_x = player_spawn_x
                 player_y = player_spawn_y
                 state["start_cutscene_active"] = False
+                state["start_cutscene_open_t"] = 0.0
+                state["start_cutscene_close_t"] = 1.0
         elif state["elevator_active"]:
             elapsed = time.time() - state["elevator_start_time"]
-            if elapsed < 1.0:
-                ratio = elapsed / 1.0
+            if elapsed < ELEV_ROT_DUR:
+                ratio = elapsed / ELEV_ROT_DUR
                 player_angle = state["elevator_from_angle"] + math.pi * _ease_out_cubic(ratio)
             else:
                 player_angle = state["elevator_target_angle"]
-            if elapsed >= 6.0:
-                state["elevator_transition_to_testing"] = True
-                running = False
+            state["elevator_close_t"] = _clamp01(elapsed / ELEV_DOOR_CLOSE_DUR)
+            if elapsed >= ELEV_TOTAL_DUR and not state["stats_window_active"]:
+                state["stats_window_active"] = True
+                state["stats_animation_start"] = time.time()
+                state["stats_counting_active"] = True
+                state["stats_count_start"] = time.time()
+                state["stats_can_skip"] = True
+        elif gameplay_hard_pause:
+            move_x = 0.0
+            move_y = 0.0
+            moving = False
+            vertical_velocity = 0.0
+            if state["flashback_death_active"]:
+                death_progress = deja_vu_logic.flashback_death_progress(state, now_value=now)
+                target_pitch = -min(math.radians(28.0), PITCH_LIMIT_UP * 2.8)
+                pitch_speed = 10.5 - death_progress * 3.0
+                player_pitch = max(target_pitch, player_pitch + (target_pitch - player_pitch) * min(1.0, delta * pitch_speed))
         else:
             keys = pygame.key.get_pressed()
             crouching = keys[pygame.K_LCTRL] or keys[pygame.K_RCTRL]
@@ -2086,6 +3010,8 @@ def start_tutor_maze_opengl(root=None):
             if move_len > 0.0:
                 moving = True
                 speed_mul = DEJA_VU_SPEED_BOOST if state["deja_vu_active"] else 1.0
+                if state["flashback_active"]:
+                    speed_mul *= deja_vu_logic.FLASHBACK_SPEED_BOOST
                 current_speed = SPEED * 14.0 * speed_mul * delta
                 move_x = move_x / move_len * current_speed
                 move_y = move_y / move_len * current_speed
@@ -2093,7 +3019,7 @@ def start_tutor_maze_opengl(root=None):
             if mouse_dx:
                 player_angle = wrap_angle(player_angle + mouse_dx * MOUSE_SENSITIVITY)
             if mouse_dy:
-                player_pitch = max(-PITCH_LIMIT, min(PITCH_LIMIT, player_pitch + mouse_dy * PITCH_SENSITIVITY))
+                player_pitch = max(-PITCH_LIMIT_UP, min(PITCH_LIMIT_DOWN, player_pitch + mouse_dy * PITCH_SENSITIVITY))
             tx = int(player_x)
             ty = int(player_y)
             if (not state["deja_vu_active"]) and (tx, ty) in lift_tiles:
@@ -2101,8 +3027,10 @@ def start_tutor_maze_opengl(root=None):
                 player_y -= math.sin(player_angle) * 0.32
                 state["elevator_active"] = True
                 state["elevator_start_time"] = time.time()
+                state["elevator_enter_time"] = time.time() - hud_start_time
                 state["elevator_from_angle"] = player_angle
                 state["elevator_target_angle"] = player_angle + math.pi
+                state["elevator_close_t"] = 0.0
                 play_overlay_music(resource_path("data/music/LocalCodepastElevator.wav"), fade_ms=1200)
 
             ceiling_z_here = get_ceiling_height(player_x, player_y, z_hint=player_z)
@@ -2113,13 +3041,22 @@ def start_tutor_maze_opengl(root=None):
             else:
                 crouch_amount = max(target_crouch, crouch_amount - delta * CROUCH_SPEED * CROUCH_MAX)
 
-        for lk in state["light_states"]:
-            if time.time() - state["light_timers"][lk] > 0.15:
-                state["light_timers"][lk] = time.time()
-                if random.random() < 0.2:
-                    state["light_states"][lk] = not state["light_states"][lk]
+        if rob_dialog_pause:
+            rob_floor = get_floor_height(state["rob_state"]["x"], state["rob_state"]["y"])
+            rob_dx = state["rob_state"]["x"] - player_x
+            rob_dy = state["rob_state"]["y"] - player_y
+            rob_dist = math.hypot(rob_dx, rob_dy)
+            target_pitch = math.atan2((rob_floor + 0.72) - (player_z + PLAYER_EYE_HEIGHT + bob_vertical - crouch_amount), max(0.001, rob_dist))
+            target_pitch = max(-PITCH_LIMIT_UP, min(PITCH_LIMIT_DOWN, target_pitch))
+            player_pitch = player_pitch + (target_pitch - player_pitch) * min(1.0, delta * 7.5)
+        if not gameplay_hard_pause and not rob_dialog_pause:
+            for lk in state["light_states"]:
+                if time.time() - state["light_timers"][lk] > 0.15:
+                    state["light_timers"][lk] = time.time()
+                    if random.random() < 0.2:
+                        state["light_states"][lk] = not state["light_states"][lk]
 
-        if not state["elevator_active"] and not state["start_cutscene_active"]:
+        if not gameplay_hard_pause and not rob_dialog_pause and not state["elevator_active"] and not state["start_cutscene_active"] and not state["stats_window_active"]:
             nx = player_x + move_x
             ny = player_y + move_y
 
@@ -2148,7 +3085,7 @@ def start_tutor_maze_opengl(root=None):
                 player_z = ground_z
                 vertical_velocity = 0.0
 
-        if not state["elevator_active"] and not state["start_cutscene_active"]:
+        if not gameplay_hard_pause and not rob_dialog_pause and not state["elevator_active"] and not state["start_cutscene_active"] and not state["stats_window_active"]:
             ground_z = get_walk_support_height(player_x, player_y, z_hint=player_z)
             ceiling_z = get_ceiling_height(player_x, player_y, z_hint=player_z)
             vertical_velocity -= GRAVITY * delta
@@ -2166,7 +3103,7 @@ def start_tutor_maze_opengl(root=None):
             vertical_velocity = 0.0
             player_z = get_floor_height(player_x, player_y, z_hint=player_z)
 
-        if moving and not state["elevator_active"] and not state["start_cutscene_active"]:
+        if moving and not gameplay_hard_pause and not rob_dialog_pause and not state["elevator_active"] and not state["start_cutscene_active"] and not state["stats_window_active"]:
             bob_phase += delta * 11.0
             bob_vertical = math.sin(bob_phase) * 0.055 * bob_strength
             bob_side = math.cos(bob_phase * 0.5) * 0.018 * bob_strength
@@ -2175,11 +3112,11 @@ def start_tutor_maze_opengl(root=None):
             bob_vertical *= max(0.0, 1.0 - delta * 10.0)
             bob_side *= max(0.0, 1.0 - delta * 10.0)
 
-        if state["elevator_active"] or state["start_cutscene_active"]:
+        if state["elevator_active"] or state["start_cutscene_active"] or state["stats_window_active"] or gameplay_hard_pause or rob_dialog_pause:
             crouch_amount = max(0.0, crouch_amount - delta * CROUCH_SPEED * CROUCH_MAX)
 
         pickup_radius = 0.55
-        if state["gun_pickups"]:
+        if not gameplay_hard_pause and not rob_dialog_pause and state["gun_pickups"]:
             kept = []
             for gx, gy in state["gun_pickups"]:
                 if math.hypot(player_x - gx, player_y - gy) < pickup_radius:
@@ -2188,66 +3125,78 @@ def start_tutor_maze_opengl(root=None):
                     kept.append((gx, gy))
             state["gun_pickups"] = kept
 
-        if state["bomb_pickups"]:
+        if not gameplay_hard_pause and not rob_dialog_pause and state["bomb_pickups"]:
             state["bomb_pickups"], picked_bomb = bomb_logic.pickup_bombs(state["bomb_pickups"], player_x, player_y, pickup_radius)
             if picked_bomb:
                 state["slot2_item"] = "bomb"
 
-        mannequin_state["restart_at"] = state["mannequin_restart_at"]
-        mannequin_logic.update_state(
-            mannequin_state,
-            MAP,
+        if not gameplay_hard_pause:
+            mannequin_state["restart_at"] = state["mannequin_restart_at"]
+            mannequin_logic.update_state(
+                mannequin_state,
+                MAP,
+                delta,
+                now,
+                player_x,
+                player_y,
+                player_angle,
+                lambda x1, y1, x2, y2: runtime_has_line_of_sight(x1, y1, x2, y2, is_wall),
+                is_walkable_cell,
+                state["elevator_active"] or state["start_cutscene_active"],
+                trigger_mannequin_attack,
+            )
+
+            hexagaze_logic.update_sentries(
+                state["sentries"],
+                state["sentry_projectiles"],
+                delta,
+                now,
+                player_x,
+                player_y,
+                is_wall,
+                lambda x1, y1, x2, y2: runtime_has_line_of_sight(x1, y1, x2, y2, is_wall),
+                state["elevator_active"] or state["start_cutscene_active"] or restart_pending(),
+                damage_player,
+                hexagaze_config,
+            )
+
+            mannequin_cell = (int(mannequin_state["x"]), int(mannequin_state["y"])) if mannequin_state["x"] is not None and mannequin_state["y"] is not None else None
+            bomb_update = bomb_logic.update_bomb_system(
+                state["placed_bombs"],
+                state["active_explosions"],
+                bomb_assets,
+                delta,
+                now,
+                (int(player_x), int(player_y)),
+                mannequin_cell,
+                mannequin_state["alive"],
+                damage_entities_in_bomb_area,
+                bomb_world_frame_index,
+                bomb_world_anim_acc,
+                activator_click_animating,
+                activator_click_frame_index,
+                activator_click_acc,
+            )
+            bomb_world_frame_index = bomb_update["bomb_world_frame_index"]
+            bomb_world_anim_acc = bomb_update["bomb_world_anim_acc"]
+            activator_click_animating = bomb_update["activator_click_animating"]
+            activator_click_frame_index = bomb_update["activator_click_frame_index"]
+            activator_click_acc = bomb_update["activator_click_acc"]
+
+        rob_logic.update_rob(
+            state["rob_state"],
             delta,
             now,
             player_x,
             player_y,
-            player_angle,
-            has_line_of_sight,
-            is_walkable_cell,
-            state["elevator_active"] or state["start_cutscene_active"],
-            trigger_mannequin_attack,
+            lambda tx, ty: not is_wall(tx, ty, get_floor_height(tx, ty, z_hint=player_z) + 0.1),
+            lambda x1, y1, x2, y2: runtime_has_line_of_sight(x1, y1, x2, y2, is_wall),
         )
-
-        hexagaze_logic.update_sentries(
-            state["sentries"],
-            state["sentry_projectiles"],
-            delta,
-            now,
-            player_x,
-            player_y,
-            is_wall,
-            has_line_of_sight,
-            state["elevator_active"] or state["start_cutscene_active"] or restart_pending(),
-            damage_player,
-            hexagaze_config,
-        )
-
-        mannequin_cell = (int(mannequin_state["x"]), int(mannequin_state["y"])) if mannequin_state["x"] is not None and mannequin_state["y"] is not None else None
-        bomb_update = bomb_logic.update_bomb_system(
-            state["placed_bombs"],
-            state["active_explosions"],
-            bomb_assets,
-            delta,
-            now,
-            (int(player_x), int(player_y)),
-            mannequin_cell,
-            mannequin_state["alive"],
-            damage_entities_in_bomb_area,
-            bomb_world_frame_index,
-            bomb_world_anim_acc,
-            activator_click_animating,
-            activator_click_frame_index,
-            activator_click_acc,
-        )
-        bomb_world_frame_index = bomb_update["bomb_world_frame_index"]
-        bomb_world_anim_acc = bomb_update["bomb_world_anim_acc"]
-        activator_click_animating = bomb_update["activator_click_animating"]
-        activator_click_frame_index = bomb_update["activator_click_frame_index"]
-        activator_click_acc = bomb_update["activator_click_acc"]
 
         update_deja_vu(delta)
-        update_impact_particles(delta)
-        update_bullet_marks(delta)
+        if not deja_vu_blackout_active:
+            runtime_update_impact_particles(state, delta, get_floor_height)
+            runtime_update_bullet_marks(state, delta)
 
         state["target_cell"] = get_targeted_floor_cell() if state["selected_slot"] == 2 and state["slot2_item"] == "bomb" else None
 
@@ -2266,82 +3215,210 @@ def start_tutor_maze_opengl(root=None):
         cam_y = player_y + camera_right_y * bob_side
         cam_z = player_z + PLAYER_EYE_HEIGHT + bob_vertical - crouch_amount
         glTranslatef(-cam_x, -cam_z, -cam_y)
-        draw_runtime_floor_and_ceiling(player_x, player_y, player_angle, rear_world_culling_enabled)
+        if runtime_display_lists:
+            glCallList(runtime_display_lists["floor"])
+            glCallList(runtime_display_lists["world"])
+        else:
+            runtime_draw_runtime_floor_and_ceiling(CUSTOM_RUNTIME_GEOMETRY, MAP, get_floor_height, get_ceiling_height, player_x, player_y, player_angle, rear_world_culling_enabled)
 
-        for wall in iter_runtime_walls():
-            x = wall["x"]
-            y = wall["y"]
-            if not is_render_point_visible(x + 0.5, y + 0.5, near_dist=1.6, back_margin=-0.30):
+            for wall in runtime_iter_runtime_walls(CUSTOM_RUNTIME_GEOMETRY, MAP, has_upper_wall):
+                x = wall["x"]
+                y = wall["y"]
+                if not is_render_point_visible(x + 0.5, y + 0.5, near_dist=1.6, back_margin=-0.30):
+                    continue
+                wall_dist = math.hypot((x + 0.5) - player_x, (y + 0.5) - player_y)
+                draw_box(
+                    x,
+                    wall["base_z"],
+                    y,
+                    1.0,
+                    wall["height"],
+                    default_cell_color(wall["cell"]),
+                    texture_id=wall_texture_id,
+                    shade=fog_shade(wall_dist, min_light=0.24),
+                    scale_x=wall.get("scale_x", 1.0),
+                    scale_y=wall.get("scale_y", 1.0),
+                    scale_z=1.0,
+                    offset_x=wall.get("offset_x", 0.0),
+                    offset_y=wall.get("offset_y", 0.0),
+                    offset_z=wall.get("offset_z", 0.0),
+                    rotation_x=wall.get("rotation_x", 0.0),
+                    rotation_y=wall.get("rotation_y", 0.0),
+                    rotation_z=wall.get("rotation", 0.0),
+                )
+
+            for stair in runtime_iter_runtime_stairs(CUSTOM_RUNTIME_GEOMETRY):
+                x = stair["x"]
+                y = stair["y"]
+                if not is_render_point_visible(x + 0.5, y + 0.5, near_dist=1.2, back_margin=-0.30):
+                    continue
+                stair_dist = math.hypot((x + 0.5) - player_x, (y + 0.5) - player_y)
+                draw_ramp(
+                    x,
+                    stair["base_z"],
+                    y,
+                    1.0,
+                    stair["height"],
+                    stair["rotation"],
+                    default_cell_color("I"),
+                    texture_id=wall_texture_id,
+                    shade=fog_shade(stair_dist, min_light=0.28),
+                    scale_x=stair.get("scale_x", 1.0),
+                    scale_y=stair.get("scale_y", 1.0),
+                    scale_z=1.0,
+                    offset_x=stair.get("offset_x", 0.0),
+                    offset_y=stair.get("offset_y", 0.0),
+                    offset_z=stair.get("offset_z", 0.0),
+                    rotation_x=stair.get("rotation_x", 0.0),
+                    rotation_y=stair.get("rotation_y", 0.0),
+                )
+
+            for link in runtime_iter_runtime_stair_links(CUSTOM_RUNTIME_GEOMETRY):
+                center_x = (link["start_x"] + link["end_x"]) * 0.5
+                center_y = (link["start_y"] + link["end_y"]) * 0.5
+                if not is_render_point_visible(center_x, center_y, near_dist=1.0, back_margin=-0.30):
+                    continue
+                link_dist = math.hypot(center_x - player_x, center_y - player_y)
+                draw_bridge_plane(
+                    link["start_x"],
+                    link["start_z"],
+                    link["start_y"],
+                    link["end_x"],
+                    link["end_z"],
+                    link["end_y"],
+                    link.get("width", 0.34),
+                    default_cell_color("I"),
+                    texture_id=wall_texture_id,
+                    shade=fog_shade(link_dist, min_light=0.28),
+                )
+
+        for human_x, human_y in state["human_markers"]:
+            if not is_render_point_visible(human_x, human_y, near_dist=1.0, back_margin=-0.25):
                 continue
-            wall_dist = math.hypot((x + 0.5) - player_x, (y + 0.5) - player_y)
-            draw_box(
-                x,
-                wall["base_z"],
-                y,
-                1.0,
-                wall["height"],
-                default_cell_color(wall["cell"]),
-                texture_id=wall_texture_id,
-                shade=fog_shade(wall_dist, min_light=0.24),
-                scale_x=wall.get("scale_x", 1.0),
-                scale_y=wall.get("scale_y", 1.0),
-                scale_z=1.0,
-                offset_x=wall.get("offset_x", 0.0),
-                offset_y=wall.get("offset_y", 0.0),
-                offset_z=wall.get("offset_z", 0.0),
-                rotation_x=wall.get("rotation_x", 0.0),
-                rotation_y=wall.get("rotation_y", 0.0),
-                rotation_z=wall.get("rotation", 0.0),
+            human_dist = math.hypot(human_x - player_x, human_y - player_y)
+            draw_human_model(
+                human_x,
+                get_floor_height(human_x, human_y),
+                human_y,
+                scale=0.78,
+                yaw_degrees=180.0,
+                shade=fog_shade(human_dist, min_light=0.24),
             )
 
-        for stair in iter_runtime_stairs():
-            x = stair["x"]
-            y = stair["y"]
-            if not is_render_point_visible(x + 0.5, y + 0.5, near_dist=1.2, back_margin=-0.30):
-                continue
-            stair_dist = math.hypot((x + 0.5) - player_x, (y + 0.5) - player_y)
-            draw_ramp(
-                x,
-                stair["base_z"],
-                y,
-                1.0,
-                stair["height"],
-                stair["rotation"],
-                default_cell_color("I"),
-                texture_id=wall_texture_id,
-                shade=fog_shade(stair_dist, min_light=0.28),
-                scale_x=stair.get("scale_x", 1.0),
-                scale_y=stair.get("scale_y", 1.0),
-                scale_z=1.0,
-                offset_x=stair.get("offset_x", 0.0),
-                offset_y=stair.get("offset_y", 0.0),
-                offset_z=stair.get("offset_z", 0.0),
-                rotation_x=stair.get("rotation_x", 0.0),
-                rotation_y=stair.get("rotation_y", 0.0),
-            )
+        if (
+            state["rob_state"].get("active")
+            and now >= state["rob_state"].get("invisible_until", 0.0)
+            and is_render_point_visible(state["rob_state"]["x"], state["rob_state"]["y"], near_dist=1.0, back_margin=-0.25)
+        ):
+            rob_dist = math.hypot(state["rob_state"]["x"] - player_x, state["rob_state"]["y"] - player_y)
+            rob_floor = get_floor_height(state["rob_state"]["x"], state["rob_state"]["y"])
+            rob_yaw = math.degrees(state["rob_state"].get("facing_angle", 0.0)) - 90.0
+            rob_shade = fog_shade(rob_dist, min_light=0.24)
+            rob_alpha = 0.55 if state["rob_state"].get("phase_shift_active") else 1.0
+            rob_tint = (0.84, 0.92, 0.72) if state["rob_state"].get("kindness_points", 0) >= state["rob_state"].get("anger_points", 0) else (0.92, 0.72, 0.72)
+            reaction_anim_path = state["rob_state"].get("reaction_animation")
+            reaction_anim_started_at = state["rob_state"].get("reaction_animation_started_at", 0.0)
+            reaction_anim_active = False
+            use_static_rob_lod = False
+            if reaction_anim_path:
+                try:
+                    reaction_anim_duration = get_animated_human_duration(reaction_anim_path)
+                except Exception:
+                    reaction_anim_duration = 0.0
+                if now - reaction_anim_started_at <= reaction_anim_duration:
+                    reaction_anim_active = True
+                else:
+                    state["rob_state"]["reaction_animation"] = None
+                    state["rob_state"]["reaction_animation_started_at"] = 0.0
+            if state["rob_state"].get("dialog_active"):
+                draw_rob_talk_model(
+                    state["rob_state"]["x"],
+                    rob_floor,
+                    state["rob_state"]["y"],
+                    elapsed_time=max(0.0, now - state["rob_state"].get("dialog_started_at", now)),
+                    scale=0.82,
+                    yaw_degrees=rob_yaw,
+                    shade=rob_shade,
+                    alpha=rob_alpha,
+                    tint=rob_tint,
+                )
+            elif reaction_anim_active:
+                if use_static_rob_lod:
+                    draw_human_model(
+                        state["rob_state"]["x"],
+                        rob_floor,
+                        state["rob_state"]["y"],
+                        scale=0.82,
+                        yaw_degrees=rob_yaw,
+                        shade=rob_shade,
+                        alpha=rob_alpha,
+                        tint=rob_tint,
+                    )
+                else:
+                    draw_animated_human_model(
+                        state["rob_state"]["x"],
+                        rob_floor,
+                        state["rob_state"]["y"],
+                        model_path=reaction_anim_path,
+                        elapsed_time=max(0.0, now - reaction_anim_started_at),
+                        loop=False,
+                        scale=0.82,
+                        yaw_degrees=rob_yaw,
+                        shade=rob_shade,
+                        alpha=rob_alpha,
+                        tint=rob_tint,
+                        pose_fps=10.0,
+                    )
+            else:
+                rob_mode = state["rob_state"].get("mode")
+                locomotion_anim_path = None
+                locomotion_pose_fps = 8.0
+                if rob_mode in {"wander", "chase", "flee"}:
+                    locomotion_anim_path = rob_logic.ROB_WALK_ANIM
+                    locomotion_pose_fps = 10.0
+                elif rob_mode == "idle":
+                    locomotion_anim_path = rob_logic.ROB_IDLE_ANIM
+                    locomotion_pose_fps = 6.0
 
-        for link in iter_runtime_stair_links():
-            center_x = (link["start_x"] + link["end_x"]) * 0.5
-            center_y = (link["start_y"] + link["end_y"]) * 0.5
-            if not is_render_point_visible(center_x, center_y, near_dist=1.0, back_margin=-0.30):
-                continue
-            link_dist = math.hypot(center_x - player_x, center_y - player_y)
-            draw_bridge_plane(
-                link["start_x"],
-                link["start_z"],
-                link["start_y"],
-                link["end_x"],
-                link["end_z"],
-                link["end_y"],
-                link.get("width", 0.34),
-                default_cell_color("I"),
-                texture_id=wall_texture_id,
-                shade=fog_shade(link_dist, min_light=0.28),
-            )
+                if locomotion_anim_path and not use_static_rob_lod:
+                    draw_animated_human_model(
+                        state["rob_state"]["x"],
+                        rob_floor,
+                        state["rob_state"]["y"],
+                        model_path=locomotion_anim_path,
+                        elapsed_time=now,
+                        loop=True,
+                        scale=0.82,
+                        yaw_degrees=rob_yaw,
+                        shade=rob_shade,
+                        alpha=rob_alpha,
+                        tint=rob_tint,
+                        pose_fps=locomotion_pose_fps,
+                    )
+                else:
+                    draw_human_model(
+                        state["rob_state"]["x"],
+                        rob_floor,
+                        state["rob_state"]["y"],
+                        scale=0.82,
+                        yaw_degrees=rob_yaw,
+                        shade=rob_shade,
+                        alpha=rob_alpha,
+                        tint=rob_tint,
+                    )
 
-        render_bullet_marks()
-        render_world_sprites(state, player_x, player_y, player_angle, textures, bomb_world_frame_index, is_render_point_visible)
-        render_impact_particles()
+        draw_player_body(
+            cam_x,
+            cam_y,
+            cam_z,
+            player_angle,
+            player_pitch,
+            bob_side=bob_side,
+        )
+
+        runtime_render_bullet_marks(state, bullet_marks_enabled, player_x, player_y, is_render_point_visible)
+        runtime_render_world_sprites(state, player_x, player_y, player_angle, textures, bomb_world_frame_index, is_render_point_visible, CUSTOM_RUNTIME_GEOMETRY, get_floor_height)
+        runtime_render_impact_particles(state, impact_particles_enabled, player_x, player_y, is_render_point_visible)
         draw_deja_vu_world_overlay(now)
 
         copy_framebuffer_to_texture(scene_texture[0], render_width, render_height)
@@ -2358,21 +3435,46 @@ def start_tutor_maze_opengl(root=None):
             draw_overlay_texture(scene_texture[0], jitter_x, jitter_y, width, height)
         finally:
             end_overlay(projection, viewport)
+        projection, viewport = begin_overlay(width, height)
+        try:
+            if state["start_cutscene_active"]:
+                if state["start_cutscene_open_t"] < 1.0:
+                    door_progress = 1.0 - _ease_out_cubic(state["start_cutscene_open_t"])
+                elif state["start_cutscene_close_t"] > 0.0:
+                    door_progress = _ease_out_cubic(state["start_cutscene_close_t"])
+                else:
+                    door_progress = 0.0
+                draw_door_overlay(door_progress)
+            elif state["elevator_active"]:
+                draw_door_overlay(_ease_out_cubic(state["elevator_close_t"]))
+            draw_elevator_glitch_overlay(now)
+            draw_intro_overlay()
+            draw_statistics_overlay(now)
+        finally:
+            end_overlay(projection, viewport)
         draw_crt_overlay(now)
         draw_hud_overlay()
+        draw_rob_dialog_overlay()
+        draw_deja_vu_failure_overlay(now)
+        draw_flashback_overlay(now)
+        draw_dev_debug_overlay()
 
-        pygame.display.set_caption(
-            f"TUTOR OPENGL | FPS {fps_display} | HP {state['player_health']} | "
-            f"AMMO {state['ammo']}/{state['max_ammo']} | SLOT {state['selected_slot']} | "
-            f"KILLS {state['enemies_killed']} | {'DEJA' if state['deja_vu_active'] else 'NORMAL'}"
-        )
+        if caption_timer >= 0.25:
+            pygame.display.set_caption(
+                f"TUTOR OPENGL | FPS {fps_display} | HP {state['player_health']} | "
+                f"AMMO {state['ammo']}/{state['max_ammo']} | SLOT {state['selected_slot']} | "
+                f"KILLS {state['enemies_killed']} | {'DEJA' if state['deja_vu_active'] else 'NORMAL'}"
+            )
+            caption_timer = 0.0
         pygame.display.flip()
 
     pygame.event.set_grab(False)
     pygame.mouse.set_visible(True)
+    delete_runtime_display_lists(runtime_display_lists)
     cleanup_textures()
     delete_texture(hud_texture[0])
     delete_texture(wall_texture_id)
+    release_opengl_display()
     pygame.quit()
 
     if next_action == "restart":

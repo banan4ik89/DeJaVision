@@ -29,6 +29,7 @@ try:
         glBindTexture,
         glBlendFunc,
         glCopyTexImage2D,
+        glCopyTexSubImage2D,
         glClear,
         glClearColor,
         glColor3f,
@@ -66,6 +67,8 @@ TARGET_FPS = 120
 DEFAULT_CEILING_Z = 1.3
 DEFAULT_FOG_START = 3.0
 DEFAULT_FOG_END = 14.0
+OPENGL_DISPLAY_FLAGS = pygame.DOUBLEBUF | pygame.OPENGL | pygame.FULLSCREEN if pygame is not None else 0
+_PREWARMED_OPENGL_SIZE = None
 
 
 def fog_shade(distance, start=DEFAULT_FOG_START, end=DEFAULT_FOG_END, min_light=0.22):
@@ -84,6 +87,41 @@ def require_opengl_dependencies():
             "OpenGL mode requires pygame and PyOpenGL. "
             "Install dependencies from requirements.txt first."
         )
+
+
+def acquire_opengl_display():
+    global _PREWARMED_OPENGL_SIZE
+
+    require_opengl_dependencies()
+    pygame.init()
+    info = pygame.display.Info()
+    width, height = info.current_w, info.current_h
+    current_surface = pygame.display.get_surface()
+    if (
+        current_surface is not None
+        and _PREWARMED_OPENGL_SIZE == (width, height)
+        and current_surface.get_size() == (width, height)
+    ):
+        screen = current_surface
+    else:
+        screen = pygame.display.set_mode((width, height), OPENGL_DISPLAY_FLAGS)
+        _PREWARMED_OPENGL_SIZE = (width, height)
+    return screen, width, height
+
+
+def prewarm_opengl_display():
+    screen, width, height = acquire_opengl_display()
+    glViewport(0, 0, width, height)
+    glClearColor(0.0, 0.0, 0.0, 1.0)
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+    pygame.display.flip()
+    pygame.event.pump()
+    return screen, width, height
+
+
+def release_opengl_display():
+    global _PREWARMED_OPENGL_SIZE
+    _PREWARMED_OPENGL_SIZE = None
 
 
 def wrap_angle(angle):
@@ -191,7 +229,7 @@ def create_texture_from_surface(surface):
 
 def copy_framebuffer_to_texture(texture_id, width, height):
     glBindTexture(GL_TEXTURE_2D, texture_id)
-    glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 0, 0, width, height, 0)
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height)
 
 
 def delete_texture(texture_id):
@@ -330,6 +368,17 @@ def draw_box(
     glVertex3f(corners[6][0], corners[6][2], corners[6][1])
     glTexCoord2f(u0, v0)
     glVertex3f(corners[7][0], corners[7][2], corners[7][1])
+
+    if texture_id is None:
+        glColor3f(r * 0.46, g * 0.46, b * 0.46)
+    glTexCoord2f(u0, v1)
+    glVertex3f(corners[0][0], corners[0][2], corners[0][1])
+    glTexCoord2f(u1, v1)
+    glVertex3f(corners[3][0], corners[3][2], corners[3][1])
+    glTexCoord2f(u1, v0)
+    glVertex3f(corners[2][0], corners[2][2], corners[2][1])
+    glTexCoord2f(u0, v0)
+    glVertex3f(corners[1][0], corners[1][2], corners[1][1])
 
     glEnd()
     if texture_id is not None:
@@ -566,22 +615,28 @@ def draw_floor_and_ceiling(
     fog_start=DEFAULT_FOG_START,
     fog_end=DEFAULT_FOG_END,
 ):
+    view_cos = math.cos(viewer_angle) if viewer_angle is not None else 0.0
+    view_sin = math.sin(viewer_angle) if viewer_angle is not None else 0.0
+    near_dist_sq = cull_near_dist * cull_near_dist
     glBegin(GL_QUADS)
     for y, row in enumerate(map_rows):
         for x, _cell in enumerate(row):
+            center_x = x + 0.5
+            center_y = y + 0.5
+            dx = center_x - viewer_x if viewer_x is not None else 0.0
+            dy = center_y - viewer_y if viewer_y is not None else 0.0
+            dist_sq = dx * dx + dy * dy
             if rear_cull and viewer_x is not None and viewer_y is not None and viewer_angle is not None:
-                dx = (x + 0.5) - viewer_x
-                dy = (y + 0.5) - viewer_y
-                dist = math.hypot(dx, dy)
-                if dist > cull_near_dist:
-                    facing = (dx * math.cos(viewer_angle) + dy * math.sin(viewer_angle)) / max(0.0001, dist)
+                if dist_sq > near_dist_sq:
+                    dist = math.sqrt(dist_sq)
+                    facing = (dx * view_cos + dy * view_sin) / max(0.0001, dist)
                     if facing < cull_margin:
                         continue
-            floor_z = floor_height_fn(x + 0.5, y + 0.5)
-            cell_ceiling_z = ceiling_z if ceiling_height_fn is None else ceiling_height_fn(x + 0.5, y + 0.5)
+            floor_z = floor_height_fn(center_x, center_y)
+            cell_ceiling_z = ceiling_z if ceiling_height_fn is None else ceiling_height_fn(center_x, center_y)
             shade = 1.0
             if viewer_x is not None and viewer_y is not None:
-                dist = math.hypot((x + 0.5) - viewer_x, (y + 0.5) - viewer_y)
+                dist = math.sqrt(dist_sq)
                 shade = fog_shade(dist, start=fog_start, end=fog_end, min_light=0.28)
 
             glColor3f((0.16 + floor_z * 0.10) * shade, (0.16 + floor_z * 0.03) * shade, 0.18 * shade)
@@ -807,10 +862,7 @@ def run_opengl_maze(
     if cell_getter is None:
         cell_getter = lambda x, y: map_rows[int(y)][int(x)]
 
-    pygame.init()
-    info = pygame.display.Info()
-    width, height = info.current_w, info.current_h
-    pygame.display.set_mode((width, height), pygame.DOUBLEBUF | pygame.OPENGL | pygame.FULLSCREEN)
+    _screen, width, height = acquire_opengl_display()
     clock = pygame.time.Clock()
 
     glViewport(0, 0, width, height)
@@ -833,11 +885,13 @@ def run_opengl_maze(
     running = True
     fps_display = 0
     fps_timer = 0.0
+    caption_timer = 0.0
 
     while running:
         delta = clock.tick(TARGET_FPS) / 1000.0
         delta = max(1.0 / 240.0, min(delta, 0.05))
         fps_timer += delta
+        caption_timer += delta
         if fps_timer >= 0.2:
             fps_display = int(clock.get_fps())
             fps_timer = 0.0
@@ -905,13 +959,16 @@ def run_opengl_maze(
 
         draw_markers(map_rows, floor_height_fn)
 
-        pygame.display.set_caption(
-            f"{title} | FPS {fps_display} | "
-            f"POS {player_x:.2f} {player_y:.2f} Z {player_z:.2f} | "
-            "WASD move, mouse turn, ESC exit"
-        )
+        if caption_timer >= 0.25:
+            pygame.display.set_caption(
+                f"{title} | FPS {fps_display} | "
+                f"POS {player_x:.2f} {player_y:.2f} Z {player_z:.2f} | "
+                "WASD move, mouse turn, ESC exit"
+            )
+            caption_timer = 0.0
         pygame.display.flip()
 
     pygame.event.set_grab(False)
     pygame.mouse.set_visible(True)
+    release_opengl_display()
     pygame.quit()
